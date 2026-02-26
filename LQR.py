@@ -227,76 +227,63 @@ def train_nn(model, t_data, x_data, target_data, epochs=1000, lr=1e-3):
         history.append(loss.item())
     return history
 
-def train_dgm_linear_pde(lqr_obj, dgm_model, x_test_point, epochs=1001, batch_size=512):
-    optimizer = optim.Adam(dgm_model.parameters(), lr=1e-3)
-    alpha_const = torch.tensor([[1.0], [1.0]]).float() # Fixed alpha = (1,1)^T
-    
-    # Pre-solve MC for validation 
-    v_mc_const = run_monte_carlo_implicit(lqr_obj, x_test_point, 100, 5000, alpha_val=[1.0, 1.0])
-    
+def train_dgm_linear_pde(lqr_obj, dgm_model, x_test_point, alpha_val, v_mc_target, epochs=1001, batch_size=512):
+    optimizer = torch.optim.Adam(dgm_model.parameters(), lr=1e-3)
     loss_history = []
-    mc_error_history = []
+    error_history = []
     
-    # Constants from LQR object
-    H = torch.tensor(lqr_obj.H).float()
-    M = torch.tensor(lqr_obj.M).float()
-    C = torch.tensor(lqr_obj.C).float()
-    D = torch.tensor(lqr_obj.D).float()
-    R_term = torch.tensor(lqr_obj.R).float()
-    sigma = lqr_obj.sigma
+    # Constants to device
+    H = torch.tensor(lqr_obj.H, device=device).float()
+    M = torch.tensor(lqr_obj.M, device=device).float()
+    C = torch.tensor(lqr_obj.C, device=device).float()
+    D = torch.tensor(lqr_obj.D, device=device).float()
+    R = torch.tensor(lqr_obj.R, device=device).float()
+    alpha = torch.tensor(alpha_val, device=device).float().view(-1, 1)
 
     for epoch in range(epochs):
         optimizer.zero_grad()
         
-        # Interior Domain Points (t in [0, T], x in [-3, 3]^2) 
-        t_int = torch.rand(batch_size, requires_grad=True) * lqr_obj.T
-        x_int = (torch.rand(batch_size, 1, 2, requires_grad=True) * 6 - 3)
+        # 1. Interior Loss (PDE Residual)
+        t = torch.rand(batch_size, device=device, requires_grad=True) * lqr_obj.T
+        x = (torch.rand(batch_size, 1, 2, device=device) * 6 - 3).requires_grad_(True)
         
-        u = dgm_model(t_int, x_int)
+        u = dgm_model(t, x)
+        grads = torch.autograd.grad(u.sum(), [t, x], create_graph=True)
+        u_t = grads[0].view(-1, 1)
+        u_x = grads[1].view(-1, 2, 1)
         
-        # Gradients for the PDE [cite: 96]
-        grad_u = torch.autograd.grad(u.sum(), [t_int, x_int], create_graph=True)
-        u_t = grad_u[0].view(-1, 1)
-        u_x = grad_u[1].view(-1, 2, 1)
+        # 2D Laplacian
+        u_xx_1 = torch.autograd.grad(u_x[:, 0].sum(), x, create_graph=True)[0][:, 0, 0]
+        u_xx_2 = torch.autograd.grad(u_x[:, 1].sum(), x, create_graph=True)[0][:, 0, 1]
+        lap = (u_xx_1 + u_xx_2).view(-1, 1)
         
-        # Hessian/Laplacian: tr(sigma*sigma^T * u_xx)
-        u_xx_1 = torch.autograd.grad(u_x[:, 0].sum(), x_int, create_graph=True)[0][:, 0, 0]
-        u_xx_2 = torch.autograd.grad(u_x[:, 1].sum(), x_int, create_graph=True)[0][:, 0, 1]
-        laplacian = (u_xx_1 + u_xx_2).view(-1, 1)
+        # Drift and Costs
+        drift = torch.bmm(u_x.transpose(1, 2), (H @ x.transpose(1, 2) + M @ alpha)).view(-1, 1)
+        running = torch.bmm(x, C @ x.transpose(1, 2)).view(-1, 1) + (alpha.t() @ D @ alpha)
         
-        # Drift: (u_x)^T * (Hx + M*alpha) 
-        drift_vec = torch.bmm(H.repeat(batch_size, 1, 1), x_int.transpose(1, 2)) + (M @ alpha_const)
-        drift_term = torch.bmm(u_x.transpose(1, 2), drift_vec).view(-1, 1)
+        loss_pde = torch.mean((u_t + 0.5 * (lqr_obj.sigma**2) * lap + drift + running)**2)
         
-        # Running Cost: x^T C x + alpha^T D alpha 
-        run_x = torch.bmm(x_int, C @ x_int.transpose(1, 2)).view(-1, 1)
-        run_a = (alpha_const.T @ D @ alpha_const).view(-1, 1)
+        # 2. Boundary Loss (Terminal Condition)
+        t_b = torch.full((batch_size,), lqr_obj.T, device=device)
+        x_b = torch.rand(batch_size, 1, 2, device=device) * 6 - 3
+        loss_b = torch.mean((dgm_model(t_b, x_b) - torch.bmm(x_b, R @ x_b.transpose(1, 2)).view(-1, 1))**2)
         
-        # PDE Residual
-        loss_pde = torch.mean((u_t + 0.5 * (sigma**2) * laplacian + drift_term + run_x + run_a)**2)
-        
-        # Boundary Condition: u(T, x) = x^T R x 
-        x_b = (torch.rand(batch_size, 1, 2) * 6 - 3)
-        t_b = torch.full((batch_size,), lqr_obj.T)
-        u_b = dgm_model(t_b, x_b)
-        target_b = torch.bmm(x_b, R_term @ x_b.transpose(1, 2)).view(-1, 1)
-        loss_boundary = torch.mean((u_b - target_b)**2)
-        
-        # Total Loss
-        total_loss = loss_pde + loss_boundary
-        total_loss.backward()
+        loss = loss_pde + loss_b
+        loss.backward()
         optimizer.step()
         
-        loss_history.append(total_loss.item())
+        loss_history.append(loss.item())
         
-        # Validation against MC 
-        if epoch % 100 == 0:
-            dgm_val = dgm_model(torch.tensor([0.0]), torch.tensor([x_test_point])).item()
-            err = abs(dgm_val - v_mc_const) / abs(v_mc_const)
-            mc_error_history.append(err)
-            print(f"Epoch {epoch} | Loss: {total_loss.item():.4e} | MC Rel Error: {err:.4f}")
-
-    return loss_history, mc_error_history
+        # 3. Validation Error (Every 200 epochs)
+        if epoch % 200 == 0:
+            t_0 = torch.tensor([0.0], device=device)
+            x_0 = torch.tensor([x_test_point], device=device).float()
+            v_pred = dgm_model(t_0, x_0).item()
+            rel_error = abs(v_pred - v_mc_target) / abs(v_mc_target)
+            error_history.append(rel_error)
+            print(f"Epoch {epoch} | Loss: {loss.item():.4e} | Rel Error: {rel_error:.4f}")
+            
+    return loss_history, error_history
 
 def run_policy_iteration(lqr_obj, x_test_point, pia_iterations=5, pde_epochs=500, ham_epochs=200):
     """
