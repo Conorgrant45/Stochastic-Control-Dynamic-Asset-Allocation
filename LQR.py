@@ -382,7 +382,7 @@ plt.show()
 
 # ------------- Exercise 3.1 -----------------
 print("\n3.1: Deep Galerkin PDE...")
-alpha_const = torch.tensor([[1.0], [1.0]], device=device).float() # Move to device [cite: 91, 92]
+alpha_const = torch.tensor([[1.0], [1.0]], device=device).float()
 dgm_model = DGMNet().to(device) # Move model to device 
 optimizer = optim.Adam(dgm_model.parameters(), lr=1e-3)
 loss_dgm, dgm_mc_errors = [], []
@@ -398,20 +398,20 @@ for epoch in range(1001):
     u = dgm_model(t_int, x_int)
     grad_u = torch.autograd.grad(u.sum(), [t_int, x_int], create_graph=True)
     u_t = grad_u[0].view(-1, 1)
-    u_x_phys = grad_u[1].view(-1, 2) # Squeezed for calculation [cite: 92, 96]
+    u_x_phys = grad_u[1].view(-1, 2)
 
     # Laplacian for 2D [cite: 92, 96]
     u_xx_1 = torch.autograd.grad(u_x_phys[:, 0].sum(), x_int, create_graph=True)[0][:, 0, 0]
     u_xx_2 = torch.autograd.grad(u_x_phys[:, 1].sum(), x_int, create_graph=True)[0][:, 0, 1]
     lap = (u_xx_1 + u_xx_2).view(-1, 1)
 
-    # Drift: (grad_u)^T * (Hx + Ma) [cite: 31, 92, 97]
+    # Drift: (grad_u)^T * (Hx + Ma)
     H_t = torch.tensor(lqr_sim.H, device=device).float()
     M_t = torch.tensor(lqr_sim.M, device=device).float()
     drift_vec = torch.bmm(H_t.repeat(512, 1, 1), x_int.view(-1, 2, 1)) + (M_t @ alpha_const)
     drift = torch.bmm(u_x_phys.view(-1, 1, 2), drift_vec).view(-1, 1)
     
-    # Running Cost [cite: 33, 92, 97]
+    # Running Cost
     C_t = torch.tensor(lqr_sim.C, device=device).float()
     D_t = torch.tensor(lqr_sim.D, device=device).float()
     run_x = torch.bmm(x_int, C_t @ x_int.transpose(1, 2)).view(-1, 1)
