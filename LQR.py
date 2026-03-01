@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from scipy.integrate import solve_ivp
+from scipy.integrate import solve_ivp, trapezoid
 from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
 
@@ -34,30 +34,76 @@ class LQR:
         return Sprime.reshape(-1)
     
     def solve_riccati(self, time_grid):
-        """Solves Riccati ODE on a specified time grid"""
+        """Solves Riccati ODE on a specified time grid with high precision"""
 
         t_eval = time_grid.detach().numpy() if torch.is_tensor(time_grid) else np.array(time_grid)
         t_span = (self.T, np.min(t_eval))
-        sol = solve_ivp(self.ricat_RHS, t_span, self.R.flatten(), t_eval=np.sort(t_eval)[::-1])
+        
+        sol = solve_ivp(
+            self.ricat_RHS, 
+            t_span, 
+            self.R.flatten(), 
+            t_eval=np.sort(t_eval)[::-1],
+            method='RK45',    # Explicit Runge-Kutta method
+            rtol=1e-9,        # Relative tolerance
+            atol=1e-12        # Absolute tolerance
+        )
+        
         S_values = sol.y.T.reshape(-1, self.n, self.n)
         self.S_interp = interp1d(sol.t, S_values, axis=0, bounds_error=False, fill_value="extrapolate")
         return sol
 
     def get_value(self, t_batch, x_batch):
-        """Returns value function v(t, x) for a batch"""
-
-        S_t = self.S_interp(t_batch.detach().numpy())
-        res = np.einsum('bik,bkj,bij->b', x_batch.numpy(), S_t, x_batch.numpy())
+        """
+        Returns value function v(t, x) for a batch.
+        v(t,x) = x' S(t) x + integral of tr(sigma^2 * S(r)) [cite: 37]
+        """
+        t_eval = t_batch.detach().numpy().flatten() if torch.is_tensor(t_batch) else np.array(t_batch).flatten()
+        x_eval = x_batch.numpy() if torch.is_tensor(x_batch) else np.array(x_batch)
+        
+        # Solve Riccati and get S(t)
+        S_t = self.S_interp(t_eval)
+        
+        # Quadratic term: x^T * S(t) * x
+        quad = np.einsum('...ik,...kj,...ij->...', x_eval, S_t, x_eval)
+        quad = quad.flatten() # Ensure this is (N,)
+        
+        # Stochastic term: Integral of tr(sigma^2 * S(r)) from t to T
+        stochastic_term = []
+        for t in t_eval:
+            if t >= self.T:
+                stochastic_term.append(0.0)
+                continue
+            
+            # Numerical integration of the trace
+            r_grid = np.linspace(t, self.T, 100)
+            S_r = self.S_interp(r_grid)
+            trace_S = np.trace(S_r, axis1=1, axis2=2)
+            integrand = (self.sigma**2) * trace_S
+            
+            val = trapezoid(integrand, r_grid)
+            stochastic_term.append(val)
+            
+        stochastic_term = np.array(stochastic_term)
+        
+        # Combine: (N,) + (N,) = (N,)
+        res = quad + stochastic_term
         return torch.tensor(res, dtype=torch.float32).view(-1, 1)
 
     def get_control(self, t_batch, x_batch):
-        """Returns optimal Markov control a(t, x) for a batch"""
-
-        S_t = self.S_interp(t_batch.detach().numpy())
+        """
+        Returns optimal Markov control a(t, x) = -D^-1 M^T S(t) x [cite: 41]
+        """
+        t_eval = t_batch.detach().numpy().flatten() if torch.is_tensor(t_batch) else np.array(t_batch).flatten()
+        x_eval = x_batch.numpy() if torch.is_tensor(x_batch) else np.array(x_batch)
+        
+        S_t = self.S_interp(t_eval)
         K = -self.D_inv @ self.M.T @ S_t
-        ctrl = np.einsum('bij,bkj->bi', K, x_batch.numpy())
+        
+        # Multiply Gain K by state x
+        ctrl = np.einsum('bij,bkj->bi', K, x_eval)
         return torch.tensor(ctrl, dtype=torch.float32)
-
+    
 class Net_DGM(nn.Module):
     """One hidden layer NN for Value Function approximation"""
 
@@ -86,7 +132,7 @@ class FFN(nn.Module):
 
 class DGMNet(nn.Module):
     """DGM Architecture for solving the PDE"""
-    
+
     def __init__(self, input_dim=3, hidden_dim=100):
         super(DGMNet, self).__init__()
         self.net = nn.Sequential(
@@ -102,38 +148,50 @@ class DGMNet(nn.Module):
 # -------------------------------------------------------
 # Utility functions
 # -------------------------------------------------------
-
 def run_monte_carlo_explicit(lqr, x_start, N_steps, M_samples, alpha_val=None):
+    """
+    Vectorized Explicit Monte Carlo Simulator (Euler-Maruyama).
+    dX = [HX + Ma]dt + sigma*dW [cite: 31, 60]
+    """
     dt = lqr.T / N_steps
-    time_grid = torch.linspace(0, lqr.T, N_steps + 1)
+    time_grid = np.linspace(0, lqr.T, N_steps + 1)
     lqr.solve_riccati(time_grid)
     
-    S_t_all = torch.tensor(lqr.S_interp(time_grid.numpy()), dtype=torch.float32)
+    # Pre-interpolate S(t) for all steps to save time
+    S_t_all = torch.tensor(lqr.S_interp(time_grid), dtype=torch.float32)
+    
     x = torch.tensor(x_start, dtype=torch.float32).repeat(M_samples, 1, 1)
     total_cost = torch.zeros(M_samples)
     
+    # Constants
     H, M = torch.tensor(lqr.H).float(), torch.tensor(lqr.M).float()
     C, D = torch.tensor(lqr.C).float(), torch.tensor(lqr.D).float()
-    D_inv, R = torch.tensor(lqr.D_inv).float(), torch.tensor(lqr.R).float()
-    sigma = lqr.sigma
+    D_inv = torch.tensor(lqr.D_inv).float()
+    R, sigma = torch.tensor(lqr.R).float(), lqr.sigma
 
     for i in range(N_steps):
         S_curr = S_t_all[i]
+        
+        # Determine Control [cite: 41, 60]
         if alpha_val is None:
             K = -D_inv @ M.T @ S_curr
             u = torch.einsum('ij, bkj -> bi', K, x)
         else:
             u = torch.tensor(alpha_val).float().repeat(M_samples, 1)
         
+        # Accumulate Running Cost: (x^T C x + a^T D a) * dt [cite: 33]
         term_x = torch.bmm(x, C @ x.transpose(1, 2)).view(-1)
         term_u = torch.bmm(u.unsqueeze(1), D @ u.unsqueeze(2)).view(-1)
         total_cost += (term_x + term_u) * dt
         
+        # Update State (Explicit Step) 
         drift = (torch.einsum('ij, bkj -> bi', H, x) + torch.einsum('ij, bj -> bi', M, u)) * dt
         diffusion = sigma * np.sqrt(dt) * torch.randn(M_samples, 2)
         x = x + (drift + diffusion).unsqueeze(1)
 
+    # Add Terminal Cost: x_T^T * R * x_T [cite: 33]
     total_cost += torch.bmm(x, R @ x.transpose(1, 2)).view(-1)
+    
     return torch.mean(total_cost).item()
 
 def run_monte_carlo_implicit(lqr, x_start, N_steps, M_samples, alpha_val=None):
