@@ -177,7 +177,7 @@ def run_monte_carlo_explicit(lqr, x_start, N_steps, M_samples, alpha_val=None):
             K = -D_inv @ M.T @ S_curr
             u = torch.einsum('ij, bkj -> bi', K, x)
         else:
-            u = torch.tensor(alpha_val).float().repeat(M_samples, 1)
+            u = torch.tensor(alpha_val).float().view(1,2).repeat(M_samples,1)
         
         # Accumulate Running Cost: (x^T C x + a^T D a) * dt [cite: 33]
         term_x = torch.bmm(x, C @ x.transpose(1, 2)).view(-1)
@@ -216,7 +216,7 @@ def run_monte_carlo_implicit(lqr, x_start, N_steps, M_samples, alpha_val=None):
             K_curr = -D_inv @ M.T @ S_curr
             u = torch.einsum('ij, bkj -> bi', K_curr, x)
         else:
-            u = torch.tensor(alpha_val).float().repeat(M_samples, 1)
+            u = torch.tensor(alpha_val).float().view(1,2).repeat(M_samples,1)
 
         term_x = torch.bmm(x, C @ x.transpose(1, 2)).view(-1)
         term_u = torch.bmm(u.unsqueeze(1), D @ u.unsqueeze(2)).view(-1)
