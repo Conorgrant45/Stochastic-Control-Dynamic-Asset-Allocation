@@ -1,0 +1,6 @@
+numpy
+scipy
+matplotlib
+torch
+
+# pip install -r requirements.txt

@@ -56,7 +56,7 @@ class LQR:
     def get_value(self, t_batch, x_batch):
         """
         Returns value function v(t, x) for a batch.
-        v(t,x) = x' S(t) x + integral of tr(sigma^2 * S(r)) [cite: 37]
+        v(t,x) = x' S(t) x + integral of tr(sigma^2 * S(r)) 
         """
         t_eval = t_batch.detach().numpy().flatten() if torch.is_tensor(t_batch) else np.array(t_batch).flatten()
         x_eval = x_batch.numpy() if torch.is_tensor(x_batch) else np.array(x_batch)
@@ -90,18 +90,29 @@ class LQR:
         res = quad + stochastic_term
         return torch.tensor(res, dtype=torch.float32).view(-1, 1)
 
+    
     def get_control(self, t_batch, x_batch):
         """
-        Returns optimal Markov control a(t, x) = -D^-1 M^T S(t) x [cite: 41]
+        Returns optimal control a(t,x) = -D^{-1} M^T S(t) x
         """
-        t_eval = t_batch.detach().numpy().flatten() if torch.is_tensor(t_batch) else np.array(t_batch).flatten()
-        x_eval = x_batch.numpy() if torch.is_tensor(x_batch) else np.array(x_batch)
-        
-        S_t = self.S_interp(t_eval)
-        K = -self.D_inv @ self.M.T @ S_t
-        
-        # Multiply Gain K by state x
-        ctrl = np.einsum('bij,bkj->bi', K, x_eval)
+        if self.S_interp is None:
+            raise ValueError("Must call solve_riccati first")
+    
+        t_np = t_batch.detach().cpu().numpy().flatten()
+        x_np = x_batch.detach().cpu().numpy().reshape(-1, self.n)  # (batch, n)
+    
+        S_t = self.S_interp(t_np)  # (batch, n, n)
+    
+        # a(t,x) = -D^{-1} M^T S(t) x
+        # Step 1: S(t) @ x for each batch element
+        Sx = np.einsum('bij,bj->bi', S_t, x_np)  # (batch, n)
+    
+        # Step 2: M^T @ (S(t) @ x) for each batch element
+        MTSx = Sx @ self.M  # (batch, m)
+    
+        # Step 3: -D^{-1} @ (M^T @ S(t) @ x) for each batch element
+        ctrl = -MTSx @ self.D_inv  # (batch, m)
+    
         return torch.tensor(ctrl, dtype=torch.float32)
     
 class Net_DGM(nn.Module):
@@ -148,92 +159,140 @@ class DGMNet(nn.Module):
 # -------------------------------------------------------
 # Utility functions
 # -------------------------------------------------------
-def run_monte_carlo_explicit(lqr, x_start, N_steps, M_samples, alpha_val=None):
+def run_monte_carlo_explicit(lqr, x_start, N_steps, M_samples, alpha_func=None):
     """
-    Vectorized Explicit Monte Carlo Simulator (Euler-Maruyama).
-    dX = [HX + Ma]dt + sigma*dW [cite: 31, 60]
+    Explicit Euler-Maruyama Monte Carlo simulation.
+    
+    Args:
+        alpha_func: None for optimal control, callable(t, x), or numpy array for constant control
+    Returns:
+        (mean_cost, std_error) tuple
     """
     dt = lqr.T / N_steps
     time_grid = np.linspace(0, lqr.T, N_steps + 1)
     lqr.solve_riccati(time_grid)
     
-    # Pre-interpolate S(t) for all steps to save time
-    S_t_all = torch.tensor(lqr.S_interp(time_grid), dtype=torch.float32)
+    # Handle x_start shape
+    x_start = np.atleast_1d(x_start).flatten()
+    X = torch.tensor(x_start, dtype=torch.float32).unsqueeze(0).repeat(M_samples, 1)
     
-    x = torch.tensor(x_start, dtype=torch.float32).repeat(M_samples, 1, 1)
+    # Convert matrices
+    H = torch.tensor(lqr.H, dtype=torch.float32)
+    M_mat = torch.tensor(lqr.M, dtype=torch.float32)
+    C = torch.tensor(lqr.C, dtype=torch.float32)
+    D = torch.tensor(lqr.D, dtype=torch.float32)
+    R = torch.tensor(lqr.R, dtype=torch.float32)
+    
+    # Handle sigma (scalar or matrix)
+    if np.isscalar(lqr.sigma):
+        sigma = torch.eye(2) * lqr.sigma
+    else:
+        sigma = torch.tensor(lqr.sigma, dtype=torch.float32)
+    
     total_cost = torch.zeros(M_samples)
     
-    # Constants
-    H, M = torch.tensor(lqr.H).float(), torch.tensor(lqr.M).float()
-    C, D = torch.tensor(lqr.C).float(), torch.tensor(lqr.D).float()
-    D_inv = torch.tensor(lqr.D_inv).float()
-    R, sigma = torch.tensor(lqr.R).float(), lqr.sigma
-
-    for i in range(N_steps):
-        S_curr = S_t_all[i]
+    for n in range(N_steps):
+        t_n = time_grid[n]
         
-        # Determine Control [cite: 41, 60]
-        if alpha_val is None:
-            K = -D_inv @ M.T @ S_curr
-            u = torch.einsum('ij, bkj -> bi', K, x)
+        # Compute control
+        if alpha_func is None:
+            # Optimal control from LQR
+            t_batch = torch.full((M_samples,), t_n)
+            u = lqr.get_control(t_batch, X)
+        elif callable(alpha_func):
+            # Neural network or function control
+            t_batch = torch.full((M_samples,), t_n)
+            u = alpha_func(t_batch, X)
         else:
-            u = torch.tensor(alpha_val).float().view(1,2).repeat(M_samples,1)
+            # Constant control (numpy array)
+            u = torch.tensor(alpha_func, dtype=torch.float32).unsqueeze(0).repeat(M_samples, 1)
         
-        # Accumulate Running Cost: (x^T C x + a^T D a) * dt [cite: 33]
-        term_x = torch.bmm(x, C @ x.transpose(1, 2)).view(-1)
-        term_u = torch.bmm(u.unsqueeze(1), D @ u.unsqueeze(2)).view(-1)
-        total_cost += (term_x + term_u) * dt
+        # Running cost: x^T C x + u^T D u
+        cost_x = torch.sum(X * (X @ C.T), dim=1)
+        cost_u = torch.sum(u * (u @ D.T), dim=1)
+        total_cost += (cost_x + cost_u) * dt
         
-        # Update State (Explicit Step) 
-        drift = (torch.einsum('ij, bkj -> bi', H, x) + torch.einsum('ij, bj -> bi', M, u)) * dt
-        diffusion = sigma * np.sqrt(dt) * torch.randn(M_samples, 2)
-        x = x + (drift + diffusion).unsqueeze(1)
-
-    # Add Terminal Cost: x_T^T * R * x_T [cite: 33]
-    total_cost += torch.bmm(x, R @ x.transpose(1, 2)).view(-1)
+        # State update (explicit Euler-Maruyama)
+        drift = X @ H.T + u @ M_mat.T
+        dW = torch.randn(M_samples, 2) * np.sqrt(dt)
+        diffusion = dW @ sigma.T
+        
+        X = X + drift * dt + diffusion
     
-    return torch.mean(total_cost).item()
+    # Terminal cost
+    terminal_cost = torch.sum(X * (X @ R.T), dim=1)
+    total_cost += terminal_cost
+    
+    mean_cost = torch.mean(total_cost).item()
+    std_error = torch.std(total_cost).item() / np.sqrt(M_samples)
+    
+    return mean_cost, std_error
 
-def run_monte_carlo_implicit(lqr, x_start, N_steps, M_samples, alpha_val=None):
+def run_monte_carlo_implicit(lqr, x_start, N_steps, M_samples, alpha_func=None):
+    """
+    Implicit Euler Monte Carlo simulation.
+    Returns: (mean_cost, std_error) tuple
+    """
     dt = lqr.T / N_steps
-    time_grid = torch.linspace(0, lqr.T, N_steps + 1)
+    time_grid = np.linspace(0, lqr.T, N_steps + 1)
     lqr.solve_riccati(time_grid)
     
-    S_t_all = torch.tensor(lqr.S_interp(time_grid.numpy()), dtype=torch.float32)
-    x = torch.tensor(x_start, dtype=torch.float32).repeat(M_samples, 1, 1)
+    x_start = np.atleast_1d(x_start).flatten()
+    X = torch.tensor(x_start, dtype=torch.float32).unsqueeze(0).repeat(M_samples, 1)
+    
+    H = torch.tensor(lqr.H, dtype=torch.float32)
+    M_mat = torch.tensor(lqr.M, dtype=torch.float32)
+    C = torch.tensor(lqr.C, dtype=torch.float32)
+    D = torch.tensor(lqr.D, dtype=torch.float32)
+    D_inv = torch.tensor(lqr.D_inv, dtype=torch.float32)
+    R = torch.tensor(lqr.R, dtype=torch.float32)
+    I = torch.eye(lqr.n)
+    
+    if np.isscalar(lqr.sigma):
+        sigma = torch.eye(2) * lqr.sigma
+    else:
+        sigma = torch.tensor(lqr.sigma, dtype=torch.float32)
+    
     total_cost = torch.zeros(M_samples)
     
-    H, M = torch.tensor(lqr.H).float(), torch.tensor(lqr.M).float()
-    C, D = torch.tensor(lqr.C).float(), torch.tensor(lqr.D).float()
-    D_inv, R = torch.tensor(lqr.D_inv).float(), torch.tensor(lqr.R).float()
-    I = torch.eye(lqr.n)
-    sigma = lqr.sigma
-
-    for i in range(N_steps):
-        S_next, S_curr = S_t_all[i+1], S_t_all[i]
+    for n in range(N_steps):
+        t_n = time_grid[n]
+        t_np1 = time_grid[n + 1]
         
-        if alpha_val is None:
-            K_curr = -D_inv @ M.T @ S_curr
-            u = torch.einsum('ij, bkj -> bi', K_curr, x)
+        # Control at current time
+        if alpha_func is None:
+            t_batch = torch.full((M_samples,), t_n)
+            u = lqr.get_control(t_batch, X)
+        elif callable(alpha_func):
+            t_batch = torch.full((M_samples,), t_n)
+            u = alpha_func(t_batch, X)
         else:
-            u = torch.tensor(alpha_val).float().view(1,2).repeat(M_samples,1)
-
-        term_x = torch.bmm(x, C @ x.transpose(1, 2)).view(-1)
-        term_u = torch.bmm(u.unsqueeze(1), D @ u.unsqueeze(2)).view(-1)
-        total_cost += (term_x + term_u) * dt
-
-        feedback_gain = M @ D_inv @ M.T @ S_next
-        A = I - dt * (H - feedback_gain)
+            u = torch.tensor(alpha_func, dtype=torch.float32).unsqueeze(0).repeat(M_samples, 1)
         
-        dW = sigma * np.sqrt(dt) * torch.randn(M_samples, 2)
-        rhs = (x.squeeze(1) + dW).unsqueeze(2) 
+        # Running cost
+        cost_x = torch.sum(X * (X @ C.T), dim=1)
+        cost_u = torch.sum(u * (u @ D.T), dim=1)
+        total_cost += (cost_x + cost_u) * dt
         
-        x_next = torch.linalg.solve(A, rhs)
-        x = x_next.transpose(1, 2)
-
-    total_cost += torch.bmm(x, R @ x.transpose(1, 2)).view(-1)
-    return torch.mean(total_cost).item()
-
+        # Implicit update (for optimal control case)
+        S_np1 = torch.tensor(lqr.S_interp([t_np1])[0], dtype=torch.float32)
+        feedback = M_mat @ D_inv @ M_mat.T @ S_np1
+        A = I - dt * (H - feedback)
+        
+        dW = torch.randn(M_samples, 2) * np.sqrt(dt)
+        rhs = X + dW @ sigma.T
+        
+        X = torch.linalg.solve(A.unsqueeze(0).expand(M_samples, -1, -1), 
+                               rhs.unsqueeze(2)).squeeze(2)
+    
+    # Terminal cost
+    terminal_cost = torch.sum(X * (X @ R.T), dim=1)
+    total_cost += terminal_cost
+    
+    mean_cost = torch.mean(total_cost).item()
+    std_error = torch.std(total_cost).item() / np.sqrt(M_samples)
+    
+    return mean_cost, std_error
 def train_nn(model, t_data, x_data, target_data, epochs=1000, lr=1e-3):
     optimizer = optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
@@ -246,107 +305,242 @@ def train_nn(model, t_data, x_data, target_data, epochs=1000, lr=1e-3):
         history.append(loss.item())
     return history
 
-def train_dgm_linear_pde(lqr_obj, dgm_model, x_test_point, alpha_val, v_mc_target, epochs=1001, batch_size=512):
-    optimizer = torch.optim.Adam(dgm_model.parameters(), lr=1e-3)
-    loss_history, error_history = [], []
+def train_dgm_linear_pde(lqr, model, alpha, epochs=3000, batch_size=512, lr=1e-3):
+    """
+    Train DGM for the linear PDE with constant control α.
     
-    H = torch.tensor(lqr_obj.H).float()
-    M = torch.tensor(lqr_obj.M).float()
-    C = torch.tensor(lqr_obj.C).float()
-    D = torch.tensor(lqr_obj.D).float()
-    R = torch.tensor(lqr_obj.R).float()
-    alpha = torch.tensor(alpha_val).float().view(-1, 1)
-
+    PDE: ∂_t u + (1/2)tr(σσ^T ∂_xx u) + (∂_x u)^T Hx + (∂_x u)^T Mα + x^T Cx + α^T Dα = 0
+    BC:  u(T, x) = x^T R x
+    """
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1000, gamma=0.5)
+    
+    # Convert to torch tensors
+    H = torch.tensor(lqr.H, dtype=torch.float32)
+    M_mat = torch.tensor(lqr.M, dtype=torch.float32)
+    C = torch.tensor(lqr.C, dtype=torch.float32)
+    D = torch.tensor(lqr.D, dtype=torch.float32)
+    R = torch.tensor(lqr.R, dtype=torch.float32)
+    
+    # Handle sigma
+    if np.isscalar(lqr.sigma):
+        sigma_sigma_T = torch.eye(2) * (lqr.sigma ** 2)
+    else:
+        sigma_np = np.array(lqr.sigma)
+        sigma_sigma_T = torch.tensor(sigma_np @ sigma_np.T, dtype=torch.float32)
+    
+    alpha_tensor = torch.tensor(alpha, dtype=torch.float32)
+    
+    # Compute MC reference at test point
+    x_test = np.array([1.0, 1.0])
+    print("Computing MC reference value...")
+    v_mc_ref, std_err = run_monte_carlo_explicit(
+        lqr, x_test, N_steps=2000, M_samples=50000, alpha_func=alpha
+    )
+    print(f"MC reference at x={x_test}: v = {v_mc_ref:.6f} ± {std_err:.6f}")
+    
+    loss_history = []
+    error_history = []
+    
     for epoch in range(epochs):
         optimizer.zero_grad()
         
-        t = torch.rand(batch_size, requires_grad=True) * lqr_obj.T
-        x = (torch.rand(batch_size, 1, 2) * 6 - 3).requires_grad_(True)
+        # Sample interior points (avoid t=T)
+        t = (torch.rand(batch_size) * lqr.T * 0.99).requires_grad_(True)
+        x = (torch.rand(batch_size, 2) * 6 - 3).requires_grad_(True)  # Uniform on [-3, 3]^2
         
-        u = dgm_model(t, x)
-        grads = torch.autograd.grad(u.sum(), [t, x], create_graph=True)
-        u_t, u_x = grads[0].view(-1, 1), grads[1].view(-1, 2, 1)
+        # Forward pass
+        u = model(t, x)  # (batch, 1)
         
-        u_xx_1 = torch.autograd.grad(u_x[:, 0].sum(), x, create_graph=True)[0][:, 0, 0]
-        u_xx_2 = torch.autograd.grad(u_x[:, 1].sum(), x, create_graph=True)[0][:, 0, 1]
-        lap = (u_xx_1 + u_xx_2).view(-1, 1)
+        # Compute gradients
+        grad_outputs = torch.ones_like(u)
+        grads = torch.autograd.grad(u, [t, x], grad_outputs=grad_outputs, create_graph=True)
+        u_t = grads[0]  # (batch,)
+        u_x = grads[1]  # (batch, 2)
         
-        drift = torch.bmm(u_x.transpose(1, 2), (H @ x.transpose(1, 2) + M @ alpha)).view(-1, 1)
-        running = torch.bmm(x, C @ x.transpose(1, 2)).view(-1, 1) + (alpha.t() @ D @ alpha)
+        # Compute Hessian trace: tr(σσ^T ∂_xx u)
+        u_xx_trace = torch.zeros(batch_size)
+        for i in range(2):
+            grad_u_xi = torch.autograd.grad(u_x[:, i].sum(), x, create_graph=True)[0]
+            for j in range(2):
+                u_xx_trace += sigma_sigma_T[i, j] * grad_u_xi[:, j]
         
-        loss_pde = torch.mean((u_t + 0.5 * (lqr_obj.sigma**2) * lap + drift + running)**2)
+        # Drift terms
+        Hx = x @ H.T  # (batch, 2)
+        Ma = M_mat @ alpha_tensor  # (2,)
+        drift = torch.sum(u_x * (Hx + Ma), dim=1)
         
-        t_b = torch.full((batch_size,), lqr_obj.T)
-        x_b = torch.rand(batch_size, 1, 2) * 6 - 3
-        loss_b = torch.mean((dgm_model(t_b, x_b) - torch.bmm(x_b, R @ x_b.transpose(1, 2)).view(-1, 1))**2)
+        # Running costs
+        cost_x = torch.sum(x * (x @ C.T), dim=1)  # x^T C x
+        cost_a = alpha_tensor @ D @ alpha_tensor  # α^T D α (scalar)
         
-        loss = loss_pde + loss_b
+        # PDE residual
+        residual = u_t + 0.5 * u_xx_trace + drift + cost_x + cost_a
+        loss_pde = torch.mean(residual ** 2)
+        
+        # Boundary condition at t = T
+        t_bc = torch.full((batch_size,), lqr.T)
+        x_bc = torch.rand(batch_size, 2) * 6 - 3
+        u_bc = model(t_bc, x_bc)
+        target_bc = torch.sum(x_bc * (x_bc @ R.T), dim=1, keepdim=True)  # x^T R x
+        loss_bc = torch.mean((u_bc - target_bc) ** 2)
+        
+        # Total loss
+        loss = loss_pde + loss_bc
         loss.backward()
         optimizer.step()
+        scheduler.step()
         
         loss_history.append(loss.item())
         
+        # Compute error vs MC reference periodically
         if epoch % 200 == 0:
-            t_0 = torch.tensor([0.0])
-            x_0 = torch.tensor([x_test_point]).float()
-            v_pred = dgm_model(t_0, x_0).item()
-            rel_error = abs(v_pred - v_mc_target) / abs(v_mc_target)
-            error_history.append(rel_error)
-            print(f"Epoch {epoch} | Loss: {loss.item():.4e} | Rel Error: {rel_error:.4f}")
+            with torch.no_grad():
+                t_test = torch.tensor([0.0])
+                x_test_t = torch.tensor([x_test], dtype=torch.float32)
+                v_pred = model(t_test, x_test_t).item()
+                rel_error = abs(v_pred - v_mc_ref) / abs(v_mc_ref)
+                error_history.append(rel_error)
             
+            print(f"Epoch {epoch:4d} | Loss: {loss.item():.4e} | "
+                  f"PDE: {loss_pde.item():.4e} | BC: {loss_bc.item():.4e} | "
+                  f"v_pred: {v_pred:.4f} | RelErr: {rel_error:.4f}")
+    
     return loss_history, error_history
 
-def run_policy_iteration(lqr_obj, x_test_point, pia_iterations=5, pde_epochs=500, ham_epochs=200):
-    v_net, a_net = Net_DGM(hidden_dim=100), FFN(hidden_dim=100)
-    v_opt, a_opt = optim.Adam(v_net.parameters(), lr=1e-3), optim.Adam(a_net.parameters(), lr=1e-3)
+# -------------------------------------------------------
+# Policy Iteration with DGM - Fixed
+# -------------------------------------------------------
+def run_policy_iteration(lqr, n_iterations=10, pde_epochs=1000, ham_epochs=500,
+                         batch_size=512, lr=1e-3):
+    """
+    Policy Iteration Algorithm (Exercise 4.1)
     
-    H, M = torch.tensor(lqr_obj.H).float(), torch.tensor(lqr_obj.M).float()
-    C, D = torch.tensor(lqr_obj.C).float(), torch.tensor(lqr_obj.D).float()
-    R_term, sigma = torch.tensor(lqr_obj.R).float(), lqr_obj.sigma
-
-    lqr_obj.solve_riccati(torch.linspace(0, lqr_obj.T, 100))
-    v_true = lqr_obj.get_value(torch.tensor([0.0]), torch.tensor([x_test_point])).item()
-    a_true = lqr_obj.get_control(torch.tensor([0.0]), torch.tensor([x_test_point])).numpy()
-
-    pia_history = {"v_err": [], "a_err": []}
-
-    for i in range(pia_iterations):
-        for _ in range(pde_epochs):
-            v_opt.zero_grad()
-            t = torch.rand(512, requires_grad=True) * lqr_obj.T
-            x = torch.rand(512, 1, 2, requires_grad=True) * 6 - 3
-            v_val, a_val = v_net(t, x), a_net(t, x).view(-1, 2, 1).detach()
+    1. Given control a(t,x;θ_act), solve PDE for v(t,x;θ_val)
+    2. Given v, update θ_act by minimizing the Hamiltonian
+    """
+    v_net = Net_DGM(input_dim=3, hidden_dim=128, output_dim=1)
+    a_net = FFN(input_dim=3, hidden_dim=128, output_dim=2)
+    
+    # Convert matrices
+    H = torch.tensor(lqr.H, dtype=torch.float32)
+    M = torch.tensor(lqr.M, dtype=torch.float32)
+    C = torch.tensor(lqr.C, dtype=torch.float32)
+    D = torch.tensor(lqr.D, dtype=torch.float32)
+    R = torch.tensor(lqr.R, dtype=torch.float32)
+    sigma_sigma_T = torch.tensor(lqr.sigma_sigma_T, dtype=torch.float32)
+    
+    # Reference solution
+    lqr.solve_riccati(np.linspace(0, lqr.T, 1000))
+    x_test = np.array([1.0, 1.0])
+    v_true = lqr.get_value(torch.tensor([0.0]), torch.tensor([x_test])).item()
+    a_true = lqr.get_control(torch.tensor([0.0]), torch.tensor([x_test])).numpy()
+    
+    print(f"True value at x={x_test}: v = {v_true:.6f}")
+    print(f"True control at x={x_test}: a = {a_true}")
+    
+    history = {"v_error": [], "a_error": [], "v_loss": [], "h_loss": []}
+    
+    for iteration in range(n_iterations):
+        print(f"\n=== Iteration {iteration + 1}/{n_iterations} ===")
+        
+        # Step 1: Solve PDE for value function given current control
+        v_optimizer = optim.Adam(v_net.parameters(), lr=lr)
+        
+        for epoch in range(pde_epochs):
+            v_optimizer.zero_grad()
             
-            grad_v = torch.autograd.grad(v_val.sum(), [t, x], create_graph=True)
-            v_t, v_x = grad_v[0].view(-1, 1), grad_v[1].view(-1, 2, 1)
+            # Sample points
+            t = torch.rand(batch_size, requires_grad=True) * lqr.T * 0.99
+            x = (torch.rand(batch_size, 2) * 6 - 3).requires_grad_(True)
             
-            v_xx_1 = torch.autograd.grad(v_x[:, 0].sum(), x, create_graph=True)[0][:, 0, 0]
-            v_xx_2 = torch.autograd.grad(v_x[:, 1].sum(), x, create_graph=True)[0][:, 0, 1]
-            lap = (v_xx_1 + v_xx_2).view(-1, 1)
+            # Get current control (detached)
+            with torch.no_grad():
+                a = a_net(t, x)  # (batch, 2)
             
-            drift = torch.bmm(v_x.transpose(1, 2), (H @ x.transpose(1, 2) + M @ a_val)).view(-1, 1)
-            running = torch.bmm(x, C @ x.transpose(1, 2)).view(-1, 1) + torch.bmm(a_val.transpose(1, 2), D @ a_val).view(-1, 1)
+            # Forward pass
+            v = v_net(t, x)
             
-            loss_pde = torch.mean((v_t + 0.5 * (sigma**2) * lap + drift + running)**2)
-            x_b, t_b = (torch.rand(256, 1, 2) * 6 - 3), torch.full((256,), lqr_obj.T)
-            loss_b = torch.mean((v_net(t_b, x_b) - torch.bmm(x_b, R_term @ x_b.transpose(1, 2)).view(-1, 1))**2)
+            # Gradients
+            grad_outputs = torch.ones_like(v)
+            grads = torch.autograd.grad(v, [t, x], grad_outputs=grad_outputs, create_graph=True)
+            v_t = grads[0]
+            v_x = grads[1]
             
-            (loss_pde + loss_b).backward(); v_opt.step()
-
-        for _ in range(ham_epochs):
-            a_opt.zero_grad()
-            t_ham, x_ham = torch.rand(512) * lqr_obj.T, torch.rand(512, 1, 2, requires_grad=True) * 6 - 3
-            v_x_fix = torch.autograd.grad(v_net(t_ham, x_ham).sum(), x_ham)[0].view(-1, 2, 1).detach()
+            # Hessian trace
+            v_xx = torch.zeros(batch_size)
+            for i in range(2):
+                grad_v_xi = torch.autograd.grad(v_x[:, i].sum(), x, create_graph=True)[0]
+                for j in range(2):
+                    v_xx += sigma_sigma_T[i, j] * grad_v_xi[:, j]
             
-            a_curr = a_net(t_ham, x_ham).view(-1, 2, 1)
-            hamiltonian = torch.mean(torch.bmm(v_x_fix.transpose(1, 2), M @ a_curr).view(-1, 1) + torch.bmm(a_curr.transpose(1, 2), D @ a_curr).view(-1, 1))
-            hamiltonian.backward(); a_opt.step()
-
+            # Drift terms
+            Hx = x @ H.T
+            Ma = a @ M.T
+            drift = torch.sum(v_x * (Hx + Ma), dim=1)
+            
+            # Running cost
+            cost_x = torch.sum(x * (x @ C.T), dim=1)
+            cost_a = torch.sum(a * (a @ D.T), dim=1)
+            
+            # PDE residual
+            residual = v_t + 0.5 * v_xx + drift + cost_x + cost_a
+            loss_pde = torch.mean(residual**2)
+            
+            # Boundary condition
+            t_b = torch.full((batch_size,), lqr.T)
+            x_b = torch.rand(batch_size, 2) * 6 - 3
+            v_b = v_net(t_b, x_b)
+            target_b = torch.sum(x_b * (x_b @ R.T), dim=1, keepdim=True)
+            loss_bc = torch.mean((v_b - target_b)**2)
+            
+            loss = loss_pde + loss_bc
+            loss.backward()
+            v_optimizer.step()
+        
+        history["v_loss"].append(loss.item())
+        
+        # Step 2: Update control by minimizing Hamiltonian
+        a_optimizer = optim.Adam(a_net.parameters(), lr=lr)
+        
+        for epoch in range(ham_epochs):
+            a_optimizer.zero_grad()
+            
+            t = torch.rand(batch_size) * lqr.T
+            x = (torch.rand(batch_size, 2) * 6 - 3).requires_grad_(True)
+            
+            # Get gradient of value function (detached)
+            v = v_net(t, x)
+            v_x = torch.autograd.grad(v.sum(), x, create_graph=False)[0].detach()
+            
+            # Current control
+            a = a_net(t, x)
+            
+            # Hamiltonian (only terms involving a)
+            # H = v_x^T M a + a^T D a
+            Ma = a @ M.T
+            hamiltonian = torch.mean(torch.sum(v_x * Ma, dim=1) + torch.sum(a * (a @ D.T), dim=1))
+            
+            hamiltonian.backward()
+            a_optimizer.step()
+        
+        history["h_loss"].append(hamiltonian.item())
+        
+        # Evaluate errors
         with torch.no_grad():
-            v_curr = v_net(torch.tensor([0.0]), torch.tensor([x_test_point])).item()
-            a_curr = a_net(torch.tensor([0.0]), torch.tensor([x_test_point])).numpy()
-            v_err, a_err = abs(v_curr - v_true) / abs(v_true), np.linalg.norm(a_curr - a_true) / np.linalg.norm(a_true)
-            pia_history["v_err"].append(v_err); pia_history["a_err"].append(a_err)
-            print(f"Iteration {i+1}: Value Error = {v_err:.4f}, Action Error = {a_err:.4f}")
-
-    return pia_history
+            t_eval = torch.tensor([0.0])
+            x_eval = torch.tensor([x_test], dtype=torch.float32)
+            
+            v_pred = v_net(t_eval, x_eval).item()
+            a_pred = a_net(t_eval, x_eval).numpy().flatten()
+            
+            v_error = abs(v_pred - v_true) / abs(v_true)
+            a_error = np.linalg.norm(a_pred - a_true) / np.linalg.norm(a_true)
+            
+            history["v_error"].append(v_error)
+            history["a_error"].append(a_error)
+            
+            print(f"Value: pred={v_pred:.4f}, true={v_true:.4f}, error={v_error:.4f}")
+            print(f"Control: pred={a_pred}, true={a_true}, error={a_error:.4f}")
+    
+    return v_net, a_net, history
