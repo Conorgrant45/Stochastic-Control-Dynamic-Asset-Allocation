@@ -428,7 +428,12 @@ def run_policy_iteration(lqr, n_iterations=10, pde_epochs=1000, ham_epochs=500,
     C = torch.tensor(lqr.C, dtype=torch.float32)
     D = torch.tensor(lqr.D, dtype=torch.float32)
     R = torch.tensor(lqr.R, dtype=torch.float32)
-    sigma_sigma_T = torch.tensor(lqr.sigma_sigma_T, dtype=torch.float32)
+    
+    if np.isscalar(lqr.sigma):
+        sigma_sigma_T = torch.eye(2) * (lqr.sigma ** 2)
+    else:
+        sigma_np = np.array(lqr.sigma)
+        sigma_sigma_T = torch.tensor(sigma_np @ sigma_np.T, dtype=torch.float32)
     
     # Reference solution
     lqr.solve_riccati(np.linspace(0, lqr.T, 1000))
