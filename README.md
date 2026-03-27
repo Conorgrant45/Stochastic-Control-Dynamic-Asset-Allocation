@@ -17,7 +17,7 @@ Figure 7 & 8 policy_iteration_main.py - Runs the full Policy Iteration Algorithm
 
 Clone the repository: git clone https://github.com/Conorgrant45/Stochastic-Control-Dynamic-Asset-Allocation.git
 
-#### Execute: Modular code that uses LQR.py with the main mechanics and report_file.ipynb for each phase of the report
+#### Execute: Modular code that uses LQR.py for the main mechanics and report_file.ipynb for each phase of the report
 
 Note: Some of the plots take several minutes to reproduce, mainly figure 2 of varying monte carlo samples
 
