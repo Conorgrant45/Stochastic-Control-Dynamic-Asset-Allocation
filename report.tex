@@ -1,0 +1,357 @@
+\documentclass[12pt, a4paper]{article}
+
+% --- Packages ---
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{parskip}
+\usepackage{microtype}
+\usepackage{enumitem}
+
+% --- Hyperlink styling ---
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    urlcolor=blue!70!black,
+    citecolor=blue!70!black
+}
+
+% --- Code listing style ---
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{gray},
+    stringstyle=\color{orange!80!black},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray}
+}
+
+% --- Math operators ---
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\tr}{\operatorname{tr}}
+\newcommand{\diag}{\operatorname{diag}}
+
+% ============================================================
+\begin{document}
+
+% --- Title Page ---
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+    {\LARGE \textbf{Stochastic Control and Dynamic Asset Allocation} \par}
+    \vspace{0.5cm}
+    {\Large Coursework 2025--26 \par}
+    \vspace{2cm}
+    {\large
+    \begin{tabular}{lll}
+        \toprule
+        \textbf{Name} & \textbf{Student Number} & \textbf{Contribution} \\
+        \midrule
+        Aaro Parkkinen & s2102444 & [e.g.\ $1/3$] \\
+        Conor Grant & s28... & [e.g.\ $1/3$] \\
+        \bottomrule
+    \end{tabular}
+    \par}
+    \vspace{2cm}
+    {\large \textbf{GitHub Repository:} \\[0.4em]
+    \url{https://github.com/YOUR_USERNAME/YOUR_REPO} \par}
+    \vspace{1cm}
+    {\large Submitted: \today \par}
+    \vfill
+    {\normalsize School of Mathematics, University of Edinburgh}
+\end{titlepage}
+
+% --- Table of Contents ---
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Linear Quadratic Regulator (LQR)}
+\label{sec:lqr}
+
+We consider the controlled SDE
+\[
+    dX_s = \bigl[HX_s + M\alpha_s\bigr]\,ds + \sigma\,dW_s,
+    \quad s \in [t, T],\quad X_t = x,
+\]
+and aim to minimise the cost functional
+\[
+    J^\alpha(t,x) := \E^{t,x}\!\left[
+        \int_t^T \!\bigl(X_s^\top C X_s + \alpha_s^\top D\alpha_s\bigr)\,ds
+        + X_T^\top R X_T
+    \right].
+\]
+The value function $v(t,x) = \inf_\alpha J^\alpha(t,x)$ satisfies
+\[
+    v(t,x) = x^\top S(t)x + \int_t^T \tr\!\bigl(\sigma\sigma^\top S(r)\bigr)\,dr,
+\]
+where $S$ solves the Riccati ODE
+\[
+    S'(r) = -2H^\top S(r) + S(r)MD^{-1}M^\top S(r) - C,
+    \quad S(T) = R,
+\]
+and the optimal Markov control is $a(t,x) = -D^{-1}M^\top S(t)x$.
+
+% ---- Problem parameters ----
+\subsection{Problem Parameters}
+\label{subsec:params}
+
+% TODO: state the specific matrices H, M, C, D, R, sigma you chose and why.
+[State your chosen matrices here, e.g.\ $H = \ldots$, $M = \ldots$, etc.]
+
+\subsection{Exercise 1.1 -- Solving the LQR via the Riccati ODE}
+\label{subsec:ex1.1}
+
+% TODO: Briefly describe your LQRSolver class: how you solve the Riccati ODE
+% (e.g. scipy solve_ivp with RK45), the time-grid interface, and the
+% value/control methods.
+
+We implemented an \texttt{LQRSolver} class in Python with the following interface:
+\begin{itemize}
+    \item \textbf{Initialisation:} accepts matrices $H, M, C, D, R, \sigma$ and horizon $T$.
+    \item \textbf{\texttt{solve\_riccati(time\_grid)}:} numerically integrates the Riccati ODE backwards in time using \texttt{[METHOD, e.g. scipy.integrate.solve\_ivp with RK45]}.
+    \item \textbf{\texttt{value(t, x)}:} returns $v(t,x)$ for batched $(t,x)$ inputs.
+    \item \textbf{\texttt{control(t, x)}:} returns $a(t,x)$ for batched inputs.
+\end{itemize}
+
+% TODO: any relevant implementation detail or snippet worth highlighting.
+
+\subsection{Exercise 1.2 -- Monte Carlo Verification}
+\label{subsec:ex1.2}
+
+\subsubsection{Error Measure}
+\label{subsubsec:error}
+
+% TODO: define and justify your error measure, e.g.:
+We measure the relative $L^2$ error between the Monte Carlo estimate $\hat{v}$ and
+the Riccati value $v^*$:
+\[
+    \varepsilon = \frac{|\hat{v}(t_0, x_0) - v^*(t_0, x_0)|}{|v^*(t_0, x_0)|}.
+\]
+% Justify why this is appropriate (scale-invariant, meaningful for comparison).
+[Justify your choice here.]
+
+\subsubsection{Discretisation Scheme}
+
+% TODO: state which scheme (explicit / implicit) you used and why.
+We used the \textbf{[explicit / implicit]} Euler--Maruyama scheme.
+[Explain the trade-off; if implicit, note that a linear system is solved at each step.]
+
+\subsubsection{Varying the Number of Time Steps}
+
+With $N_{\mathrm{MC}} = 10^5$ Monte Carlo samples fixed, we varied the number of
+time steps $N \in \{1, 10, 50, 100, 500, 1000, 5000\}$.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\linewidth]{figures/ex1_2_timesteps.png}
+    \caption{Log--log plot of the error vs.\ number of time steps $N$
+             (fixed $N_{\mathrm{MC}} = 10^5$). The dashed line indicates
+             the expected $\mathcal{O}(N^{-1})$ convergence rate.}
+    \label{fig:ex1.2_timesteps}
+\end{figure}
+
+% TODO: comment on the observed slope and whether it matches theory.
+[Comment on the observed convergence rate.]
+
+\subsubsection{Varying the Number of Monte Carlo Samples}
+
+With $N = 5000$ time steps fixed, we varied
+$N_{\mathrm{MC}} \in \{10, 50, 10^2, 5\times10^2, 10^3, 5\times10^3,
+10^4, 5\times10^4, 10^5\}$.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\linewidth]{figures/ex1_2_mcsamples.png}
+    \caption{Log--log plot of the error vs.\ number of Monte Carlo samples
+             (fixed $N = 5000$). The dashed line indicates the expected
+             $\mathcal{O}(N_{\mathrm{MC}}^{-1/2})$ convergence rate.}
+    \label{fig:ex1.2_mcsamples}
+\end{figure}
+
+% TODO: comment on the observed slope.
+[Comment on the observed $-1/2$ slope and any deviation at large $N_{\mathrm{MC}}$
+ due to discretisation bias.]
+
+% ============================================================
+\section{Supervised Learning -- Checking the Neural Networks}
+\label{sec:supervised}
+
+We verify that our neural network architectures are expressive enough to approximate
+both the value function $v$ and the optimal control $a$.
+
+\subsection{Exercise 2.1 -- Supervised Learning of the Value Function}
+\label{subsec:ex2.1}
+
+% TODO: describe the NetDGM architecture, hidden size 100, training setup.
+We used the \texttt{Net\_DGM} architecture with hidden layer size 100.
+Training data $\{(t^{(i)}, x^{(i)}, v(t^{(i)}, x^{(i)}))\}_{i=1}^{N_{\mathrm{data}}}$
+was generated by sampling $t \sim \mathrm{Uniform}([0,T])$ and
+$x \sim \mathrm{Uniform}([-3,3]^2)$, with labels from the Riccati solver.
+
+We minimised the MSE loss using the Adam optimiser
+($N_{\mathrm{data}} = \ldots$, learning rate $= \ldots$, epochs $= \ldots$).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\linewidth]{figures/ex2_1_loss.png}
+    \caption{Training loss (MSE) for supervised learning of the value function $v$.}
+    \label{fig:ex2.1_loss}
+\end{figure}
+
+% TODO: comment on convergence and final training loss.
+[Comment here.]
+
+\subsection{Exercise 2.2 -- Supervised Learning of the Markov Control}
+\label{subsec:ex2.2}
+
+% TODO: describe the FFN architecture (2 hidden layers, size 100, 2D output).
+We used a feed-forward network (\texttt{FFN}) with 2 hidden layers of width 100
+and a 2-dimensional output (matching the control dimension).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\linewidth]{figures/ex2_2_loss.png}
+    \caption{Training loss (MSE) for supervised learning of the Markov control $a$.}
+    \label{fig:ex2.2_loss}
+\end{figure}
+
+% TODO: comment on convergence and final training loss.
+[Comment here.]
+
+% ============================================================
+\section{Deep Galerkin Method for a Linear PDE}
+\label{sec:dgm}
+
+We consider the linear PDE with constant control $\alpha = (1,1)^\top$:
+\[
+    \partial_t u + \tfrac{1}{2}\tr\!\bigl(\sigma\sigma^\top \partial_{xx}u\bigr)
+    + (\partial_x u)^\top Hx + (\partial_x u)^\top M\alpha
+    + x^\top Cx + \alpha^\top D\alpha = 0
+    \quad \text{on } [0,T)\times\R^2,
+\]
+\[
+    u(T,x) = x^\top Rx \quad \text{on } \R^2.
+\]
+
+\subsection{Exercise 3.1 -- Deep Galerkin Approximation}
+\label{subsec:ex3.1}
+
+% TODO: describe the DGM residual loss, boundary loss, architecture, training setup.
+We approximate $u$ by a neural network $u(\cdot,\cdot;\theta)$ and minimise
+\[
+    \mathcal{R}(\theta) = \mathcal{R}_{\mathrm{eqn}}(\theta) + \mathcal{R}_{\mathrm{bdry}}(\theta),
+\]
+where both terms are empirical averages over $N_{\mathrm{batch}}$ randomly sampled
+collocation points. Automatic differentiation (via \texttt{torch.autograd}) is used
+to compute $\partial_t u$ and $\partial_{xx} u$.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\linewidth]{figures/ex3_1_loss.png}
+    \caption{DGM training loss $\mathcal{R}(\theta)$ vs.\ training iteration.}
+    \label{fig:ex3.1_loss}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\linewidth]{figures/ex3_1_mc_error.png}
+    \caption{Error of the DGM solution against the Monte Carlo reference
+             (constant control $\alpha$) at selected training checkpoints.}
+    \label{fig:ex3.1_mc_error}
+\end{figure}
+
+% TODO: comment on convergence of the loss and the MC error.
+[Comment on the results.]
+
+% ============================================================
+\section{Policy Iteration with DGM}
+\label{sec:pia}
+
+\subsection{Algorithm Description}
+\label{subsec:pia_algo}
+
+The Policy Improvement Algorithm (PIA) alternates between two steps:
+
+\begin{enumerate}
+    \item \textbf{Policy evaluation:} Given the current control network
+          $a(\cdot,\cdot;\theta_{\mathrm{act}})$, solve the associated linear PDE
+          (as in Section~\ref{sec:dgm}) to update $\theta_{\mathrm{val}}$.
+    \item \textbf{Policy improvement:} With $\theta_{\mathrm{val}}$ fixed, update
+          $\theta_{\mathrm{act}}$ by minimising the Hamiltonian
+          \[
+              \mathcal{H}(\theta_{\mathrm{act}}) = \frac{1}{N_{\mathrm{batch}}}
+              \sum_{i=1}^{N_{\mathrm{batch}}} \Bigl[
+                  (\partial_x v)^\top Hx^{(i)}
+                  + (\partial_x v)^\top M\,a(t^{(i)},x^{(i)};\theta_{\mathrm{act}})
+                  + (x^{(i)})^\top C x^{(i)}
+                  + a^\top D\,a
+              \Bigr].
+          \]
+\end{enumerate}
+
+% TODO: state number of PIA iterations, inner training steps per iteration,
+% learning rates, batch sizes used.
+
+\subsection{Exercise 4.1 -- Results and Convergence}
+\label{subsec:ex4.1}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\linewidth]{figures/ex4_1_value_error.png}
+    \caption{Error of the PIA value function $v(\cdot,\cdot;\theta_{\mathrm{val}})$
+             relative to the Riccati solution across PIA iterations.}
+    \label{fig:ex4.1_value}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\linewidth]{figures/ex4_1_control_error.png}
+    \caption{Error of the PIA control $a(\cdot,\cdot;\theta_{\mathrm{act}})$
+             relative to the optimal Riccati control across PIA iterations.}
+    \label{fig:ex4.1_control}
+\end{figure}
+
+% TODO: comment on convergence behaviour, any instabilities, and final accuracy.
+[Comment on the convergence of both value function and control to the LQR optimum.]
+
+% ============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+% TODO: brief summary of what was achieved and any limitations observed.
+[Summarise your key findings: accuracy of the Riccati solver, the supervised
+learning baselines, the DGM PDE solver, and the full PIA loop. Note any limitations
+or areas for improvement.]
+
+% ============================================================
+\appendix
+\section{Code Structure}
+\label{app:code}
+
+The full code is available at \url{https://github.com/YOUR_USERNAME/YOUR_REPO}.
+A \texttt{README.md} at the root of the repository describes how to reproduce
+all figures in this report.
+
+% Brief description of key files/modules (optional but helpful):
+% \begin{itemize}
+%     \item \texttt{lqr.py} -- LQRSolver class (Exercises 1.1--1.2)
+%     \item \texttt{networks.py} -- Net\_DGM and FFN architectures
+%     \item \texttt{supervised.py} -- Exercises 2.1--2.2
+%     \item \texttt{dgm.py} -- Deep Galerkin solver (Exercise 3.1)
+%     \item \texttt{pia.py} -- Policy iteration (Exercise 4.1)
+%     \item \texttt{assignment.ipynb} -- Jupyter notebook reproducing all plots
+% \end{itemize}
+
+\end{document}
