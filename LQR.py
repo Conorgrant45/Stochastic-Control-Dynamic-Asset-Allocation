@@ -500,10 +500,17 @@ def run_policy_iteration(lqr, n_iterations=10, pde_epochs=1000, ham_epochs=500,
             loss_bc = torch.mean((v_b - target_b)**2)
             
             loss = loss_pde + loss_bc
-            loss.backward()
-            v_optimizer.step()
+            hamiltonian.backward()
+            a_optimizer.step()
         
-        history["v_loss"].append(loss.item())
+        # Compute and store the FULL Hamiltonian for logging (matches PDF formula)
+        with torch.no_grad():
+                Hx_term = torch.sum(v_x * (x @ H.T), dim=1)
+                cost_x_term = torch.sum(x * (x @ C.T), dim=1)
+                full_hamiltonian = torch.mean(
+                    Hx_term + torch.sum(v_x * Ma, dim=1) + cost_x_term + torch.sum(a * (a @ D.T), dim=1)
+                )
+        history["h_loss"].append(full_hamiltonian.item())
         
         # Step 2: Update control by minimizing Hamiltonian
         a_optimizer = optim.Adam(a_net.parameters(), lr=lr)
