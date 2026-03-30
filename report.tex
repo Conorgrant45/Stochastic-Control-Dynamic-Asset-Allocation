@@ -162,7 +162,7 @@ As $N$ increases, $\Delta t = T/N$ decreases. Based on the log-log plot of the r
 
 With $N = 5000$ time steps fixed, we varied
 $N_{\mathrm{MC}} \in \{10, 50, 100, 500, 1000, 5000,
-10000, 50000, 100000}$.
+10000, 50000, 100000\}$.
 
 \begin{figure}[H]
     \centering
@@ -264,17 +264,16 @@ These two plots track the algorithm's accuracy against our exact Riccati baselin
 \end{itemize}
 
 \noindent Table~\ref{tab:pia_final} reports the final numerical comparison between the PIA output and the exact Riccati benchmark at $t=0$, $x_0 = [1,1]^\top$.
-
 \begin{table}[H]
     \centering
     \begin{tabular}{lccr}
         \toprule
         \textbf{Quantity} & \textbf{PIA Predicted} & \textbf{Riccati True} & \textbf{Rel.\ Error} \\
         \midrule
-        Value $v(0, x_0)$       & -- & 0.853368 & -- \\
-        Control $a_1(0, x_0)$   & -- & -- & -- \\
-        Control $a_2(0, x_0)$   & -- & -- & -- \\
-        $\|a_{\mathrm{pred}} - a_{\mathrm{true}}\|$ & -- & -- & -- \\
+        Value $v(0, x_0)$                            & 0.8347 & 0.8534 & 0.0218 \\
+        Control $a_1(0, x_0)$                        & -2.0873  & -3.2697  & 0.3617 \\
+        Control $a_2(0, x_0)$                        & -2.6231  & -3.2697  & 0.1977 \\
+        $\|a_{\mathrm{pred}} - a_{\mathrm{true}}\|$ & \multicolumn{2}{c}{(combined)} & 0.2914 \\
         \bottomrule
     \end{tabular}
     \caption{Final PIA numerical comparison at $t=0$, $x_0=[1,1]^\top$ after 10 iterations.}
