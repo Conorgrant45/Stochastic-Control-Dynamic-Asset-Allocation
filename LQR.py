@@ -444,6 +444,8 @@ def run_policy_iteration(lqr, n_iterations=10, pde_epochs=1000, ham_epochs=500,
     print(f"True value at x={x_test}: v = {v_true:.6f}")
     print(f"True control at x={x_test}: a = {a_true}")
     
+
+    
     history = {"v_error": [], "a_error": [], "v_loss": [], "h_loss": []}
     
     for iteration in range(n_iterations):
@@ -455,44 +457,35 @@ def run_policy_iteration(lqr, n_iterations=10, pde_epochs=1000, ham_epochs=500,
         for epoch in range(pde_epochs):
             v_optimizer.zero_grad()
             
-            # Sample points
             t = torch.rand(batch_size, requires_grad=True) * lqr.T * 0.99
             x = (torch.rand(batch_size, 2) * 6 - 3).requires_grad_(True)
             
-            # Get current control (detached)
             with torch.no_grad():
-                a = a_net(t, x)  # (batch, 2)
+                a = a_net(t, x)
             
-            # Forward pass
             v = v_net(t, x)
             
-            # Gradients
             grad_outputs = torch.ones_like(v)
             grads = torch.autograd.grad(v, [t, x], grad_outputs=grad_outputs, create_graph=True)
             v_t = grads[0]
             v_x = grads[1]
             
-            # Hessian trace
             v_xx = torch.zeros(batch_size)
             for i in range(2):
                 grad_v_xi = torch.autograd.grad(v_x[:, i].sum(), x, create_graph=True)[0]
                 for j in range(2):
                     v_xx += sigma_sigma_T[i, j] * grad_v_xi[:, j]
             
-            # Drift terms
             Hx = x @ H.T
             Ma = a @ M.T
             drift = torch.sum(v_x * (Hx + Ma), dim=1)
             
-            # Running cost
             cost_x = torch.sum(x * (x @ C.T), dim=1)
             cost_a = torch.sum(a * (a @ D.T), dim=1)
             
-            # PDE residual
             residual = v_t + 0.5 * v_xx + drift + cost_x + cost_a
             loss_pde = torch.mean(residual**2)
             
-            # Boundary condition
             t_b = torch.full((batch_size,), lqr.T)
             x_b = torch.rand(batch_size, 2) * 6 - 3
             v_b = v_net(t_b, x_b)
@@ -500,17 +493,10 @@ def run_policy_iteration(lqr, n_iterations=10, pde_epochs=1000, ham_epochs=500,
             loss_bc = torch.mean((v_b - target_b)**2)
             
             loss = loss_pde + loss_bc
-            hamiltonian.backward()
-            a_optimizer.step()
+            loss.backward()
+            v_optimizer.step()
         
-        # Compute and store the FULL Hamiltonian for logging (matches PDF formula)
-        with torch.no_grad():
-                Hx_term = torch.sum(v_x * (x @ H.T), dim=1)
-                cost_x_term = torch.sum(x * (x @ C.T), dim=1)
-                full_hamiltonian = torch.mean(
-                    Hx_term + torch.sum(v_x * Ma, dim=1) + cost_x_term + torch.sum(a * (a @ D.T), dim=1)
-                )
-        history["h_loss"].append(full_hamiltonian.item())
+        history["v_loss"].append(loss.item())
         
         # Step 2: Update control by minimizing Hamiltonian
         a_optimizer = optim.Adam(a_net.parameters(), lr=lr)
@@ -521,22 +507,27 @@ def run_policy_iteration(lqr, n_iterations=10, pde_epochs=1000, ham_epochs=500,
             t = torch.rand(batch_size) * lqr.T
             x = (torch.rand(batch_size, 2) * 6 - 3).requires_grad_(True)
             
-            # Get gradient of value function (detached)
             v = v_net(t, x)
             v_x = torch.autograd.grad(v.sum(), x, create_graph=False)[0].detach()
             
-            # Current control
             a = a_net(t, x)
             
-            # Hamiltonian (only terms involving a)
-            # H = v_x^T M a + a^T D a
             Ma = a @ M.T
-            hamiltonian = torch.mean(torch.sum(v_x * Ma, dim=1) + torch.sum(a * (a @ D.T), dim=1))
+            hamiltonian = torch.mean(
+                torch.sum(v_x * Ma, dim=1) + torch.sum(a * (a @ D.T), dim=1)
+            )
             
             hamiltonian.backward()
             a_optimizer.step()
         
-        history["h_loss"].append(hamiltonian.item())
+        # Compute and store the FULL Hamiltonian for logging (matches PDF formula)
+        with torch.no_grad():
+            Hx_term = torch.sum(v_x * (x @ H.T), dim=1)
+            cost_x_term = torch.sum(x * (x @ C.T), dim=1)
+            full_hamiltonian = torch.mean(
+                Hx_term + torch.sum(v_x * Ma, dim=1) + cost_x_term + torch.sum(a * (a @ D.T), dim=1)
+            )
+        history["h_loss"].append(full_hamiltonian.item())
         
         # Evaluate errors
         with torch.no_grad():
