@@ -270,7 +270,7 @@ class PDE_DGM_LQR(nn.Module):
         if self.mode == "fixed_control":
             self._fit_fixed(max_updates, batch_size, lr, log_every)
         else:
-            self._fit_policy_iteration_2(max_updates, pde_epochs, ham_epochs,
+            self._fit_policy_iteration(max_updates, pde_epochs, ham_epochs,
                                        batch_size, lr)
         self.eval()
         return self
@@ -461,7 +461,7 @@ class PDE_DGM_LQR(nn.Module):
 
             # ── Step i: solve PDE for v ────────────────────────────────────
             self.v_net.train()
-            v_loss_final = None
+            v_loss = None
 
             for epoch in range(pde_epochs):
                 v_opt.zero_grad()
@@ -504,15 +504,15 @@ class PDE_DGM_LQR(nn.Module):
                 torch.nn.utils.clip_grad_norm_(self.v_net.parameters(), max_norm=1.0)
                 v_opt.step()
                 v_sch.step()
-                v_loss_final = loss.item()
+                v_loss = loss.item()
 
             # Log ONE value per iteration
-            self.pia_history["v_loss"].append(v_loss_final)
-            print(f"  PDE final loss: {v_loss_final:.4e}")
+            self.pia_history["v_loss"].append(v_loss)
+            print(f"  PDE final loss: {v_loss:.4e}")
 
             # ── Step ii: minimise Hamiltonian ──────────────────────────────
             self.a_net.train()
-            h_loss_final = None
+            h_loss = None
 
             for epoch in range(ham_epochs):
                 a_opt.zero_grad()
@@ -542,11 +542,11 @@ class PDE_DGM_LQR(nn.Module):
                     full_H  = torch.mean(
                         Hx_term + torch.sum(v_x * Ma, dim=1) +
                         cost_x  + torch.sum(a * (a @ self.D_mat.T), dim=1))
-                h_loss_final = full_H.item()
+                h_loss = full_H.item()
 
             # Log ONE value per iteration
-            self.pia_history["h_loss"].append(h_loss_final)
-            print(f"  Ham final value: {h_loss_final:.4e}")
+            self.pia_history["h_loss"].append(h_loss)
+            print(f"  Ham final value: {h_loss:.4e}")
 
             # ── Evaluate errors ────────────────────────────────────────────
             self.v_net.eval(); self.a_net.eval()
