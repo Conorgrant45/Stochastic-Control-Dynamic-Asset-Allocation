@@ -270,7 +270,7 @@ class PDE_DGM_LQR(nn.Module):
         if self.mode == "fixed_control":
             self._fit_fixed(max_updates, batch_size, lr, log_every)
         else:
-            self._fit_policy_iteration(max_updates, pde_epochs, ham_epochs,
+            self._fit_policy_iteration_2(max_updates, pde_epochs, ham_epochs,
                                        batch_size, lr)
         self.eval()
         return self
@@ -434,6 +434,135 @@ class PDE_DGM_LQR(nn.Module):
             print(f"v: pred={v_pred:.4f}  true={v_true:.4f}  err={v_err:.4f}")
             print(f"a: pred={a_pred}  true={a_true}  err={a_err:.4f}")
 
+
+    def _fit_policy_iteration_2(self, n_iter, pde_epochs, ham_epochs, batch_size, lr):
+        dev = next(self.parameters()).device
+
+        x_test = np.array([1.0, 1.0])
+        v_true = self.riccati.value(0.0, x_test)
+        a_true = self.riccati.control(0.0, x_test)
+        print(f"Riccati reference  v(0,x0)={v_true:.6f},  a(0,x0)={a_true}")
+
+        # ── v_optimizer OUTSIDE the loop (persistent) ─────────────────────
+        v_opt = torch.optim.Adam(self.v_net.parameters(), lr=lr)
+
+        for iteration in range(1, n_iter + 1):
+            print(f"\n=== Policy Iteration {iteration}/{n_iter} ===")
+
+            # Keep v_net weights (warm start) but reset optimizer momentum
+            v_opt = torch.optim.Adam(self.v_net.parameters(), lr=lr)
+            v_sch = torch.optim.lr_scheduler.CosineAnnealingLR(
+                v_opt, T_max=pde_epochs, eta_min=lr * 0.01)
+
+            # Fresh a_optimizer each iteration
+            a_opt = torch.optim.Adam(self.a_net.parameters(), lr=lr)
+            a_sch = torch.optim.lr_scheduler.CosineAnnealingLR(
+                a_opt, T_max=ham_epochs, eta_min=lr * 0.01)   
+
+            # ── Step i: solve PDE for v ────────────────────────────────────
+            self.v_net.train()
+            v_loss_final = None
+
+            for epoch in range(pde_epochs):
+                v_opt.zero_grad()
+
+                t = (torch.rand(batch_size, device=dev) * self.T * 0.99).requires_grad_(True)
+                x = (torch.rand(batch_size, self.d, device=dev) * 2*self.x_range
+                    - self.x_range).requires_grad_(True)
+
+                with torch.no_grad():
+                    a = self.a_net(t, x)
+
+                u    = self.v_net(t, x)
+                ones = torch.ones_like(u)
+                grads = torch.autograd.grad(u, [t, x], grad_outputs=ones,
+                                        create_graph=True)
+                u_t = grads[0]
+                u_x = grads[1]
+
+                # Batched Hessian trace (faster + more stable than double loop)
+                sigma_ux   = u_x @ self.sigma_sigmaT
+                u_xx_trace = torch.autograd.grad(
+                    (sigma_ux * u_x).sum(), x, create_graph=True
+                )[0].sum(dim=1)
+
+                drift    = torch.sum(u_x * (x @ self.H.T + a @ self.M_mat.T), dim=1)
+                cost_x   = torch.sum(x * (x @ self.C_mat.T), dim=1)
+                cost_a   = torch.sum(a * (a @ self.D_mat.T), dim=1)
+                residual = u_t + 0.5 * u_xx_trace + drift + cost_x + cost_a
+                loss_pde = residual.pow(2).mean()
+
+                t_bc = torch.full((batch_size,), self.T, device=dev)
+                x_bc = (torch.rand(batch_size, self.d, device=dev) * 2*self.x_range
+                        - self.x_range)
+                u_bc = self.v_net(t_bc, x_bc)
+                tgt  = torch.sum(x_bc * (x_bc @ self.R_mat.T), dim=1, keepdim=True)
+                loss_bc = (u_bc - tgt).pow(2).mean()
+
+                loss = loss_pde + loss_bc
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.v_net.parameters(), max_norm=1.0)
+                v_opt.step()
+                v_sch.step()
+                v_loss_final = loss.item()
+
+            # Log ONE value per iteration
+            self.pia_history["v_loss"].append(v_loss_final)
+            print(f"  PDE final loss: {v_loss_final:.4e}")
+
+            # ── Step ii: minimise Hamiltonian ──────────────────────────────
+            self.a_net.train()
+            h_loss_final = None
+
+            for epoch in range(ham_epochs):
+                a_opt.zero_grad()
+
+                t = torch.rand(batch_size, device=dev) * self.T
+                x = (torch.rand(batch_size, self.d, device=dev) * 2*self.x_range
+                    - self.x_range).requires_grad_(True)
+
+                v   = self.v_net(t, x)
+                v_x = torch.autograd.grad(v.sum(), x, create_graph=False)[0].detach()
+                a   = self.a_net(t, x)
+                Ma  = a @ self.M_mat.T
+
+                hamiltonian = torch.mean(
+                    torch.sum(v_x * Ma, dim=1) +
+                    torch.sum(a * (a @ self.D_mat.T), dim=1)
+                )
+                hamiltonian.backward()
+                torch.nn.utils.clip_grad_norm_(self.a_net.parameters(), max_norm=1.0)
+                a_opt.step()
+                a_sch.step()
+
+                # Full Hamiltonian for logging
+                with torch.no_grad():
+                    Hx_term = torch.sum(v_x * (x @ self.H.T), dim=1)
+                    cost_x  = torch.sum(x * (x @ self.C_mat.T), dim=1)
+                    full_H  = torch.mean(
+                        Hx_term + torch.sum(v_x * Ma, dim=1) +
+                        cost_x  + torch.sum(a * (a @ self.D_mat.T), dim=1))
+                h_loss_final = full_H.item()
+
+            # Log ONE value per iteration
+            self.pia_history["h_loss"].append(h_loss_final)
+            print(f"  Ham final value: {h_loss_final:.4e}")
+
+            # ── Evaluate errors ────────────────────────────────────────────
+            self.v_net.eval(); self.a_net.eval()
+            with torch.no_grad():
+                t0 = torch.zeros(1, device=dev)
+                x0 = torch.tensor([[1.0, 1.0]], device=dev)
+                v_pred = self.v_net(t0, x0).item()
+                a_pred = self.a_net(t0, x0).cpu().numpy().flatten()
+
+            v_err = abs(v_pred - v_true) / abs(v_true)
+            a_err = np.linalg.norm(a_pred - a_true) / np.linalg.norm(a_true)
+            self.pia_history["v_error"].append(v_err)
+            self.pia_history["a_error"].append(a_err)
+            print(f"  v: pred={v_pred:.4f}  true={v_true:.4f}  err={v_err:.4f}")
+            print(f"  a: pred={a_pred}  true={a_true}  err={a_err:.4f}")
+
     # ── Evaluation methods ────────────────────────────────────────────────────
 
     def value(self, t, x):
@@ -530,3 +659,4 @@ class PDE_DGM_LQR(nn.Module):
             np.stack([self.riccati.control(ti.item(), xi.numpy().flatten())
                       for ti, xi in zip(t, x)], axis=0), dtype=torch.float32)
         return lqr
+

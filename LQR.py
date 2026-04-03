@@ -577,3 +577,185 @@ def run_policy_iteration(lqr, n_iterations=10, pde_epochs=1000, ham_epochs=500,
             print(f"Control: pred={a_pred}, true={a_true}, error={a_error:.4f}")
 
     return v_net, a_net, history
+
+
+def run_policy_iteration_2(lqr, n_iterations=10, pde_epochs=3000, ham_epochs=1000,
+                         batch_size=512, lr_v=5e-4, lr_a=1e-3):
+    """
+    Improved Policy Iteration with:
+    - More epochs for PDE convergence
+    - Persistent a_optimizer (no reset) to avoid Hamiltonian oscillation
+    - LR scheduler on both optimizers
+    - Gradient clipping for stability
+    - Early stopping within PDE loop if loss plateaus
+    """
+    v_net = Net_DGM(input_dim=3, hidden_dim=128, output_dim=1)
+    a_net = FFN(input_dim=3, hidden_dim=128, output_dim=2)
+
+    H_t = torch.tensor(lqr.H, dtype=torch.float32)
+    M_t = torch.tensor(lqr.M, dtype=torch.float32)
+    C_t = torch.tensor(lqr.C, dtype=torch.float32)
+    D_t = torch.tensor(lqr.D, dtype=torch.float32)
+    R_t = torch.tensor(lqr.R, dtype=torch.float32)
+
+    if np.isscalar(lqr.sigma):
+        sigma_sigmaT = torch.eye(2) * (lqr.sigma ** 2)
+    else:
+        s = np.array(lqr.sigma)
+        sigma_sigmaT = torch.tensor(s @ s.T, dtype=torch.float32)
+
+    lqr.solve_riccati(np.linspace(0, lqr.T, 1000))
+    x_test = np.array([1.0, 1.0])
+    v_true = lqr.get_value(torch.tensor([0.0]),
+                           torch.tensor([x_test])).item()
+    a_true = lqr.get_control(torch.tensor([0.0]),
+                              torch.tensor([x_test])).numpy().flatten()
+    print(f"True value  at x={x_test}: v = {v_true:.6f}")
+    print(f"True control at x={x_test}: a = {a_true}")
+
+    history = {
+        "v_error":      [],
+        "a_error":      [],
+        "v_loss_final": [],
+        "h_loss_final": [],
+        "v_loss_curve": [],
+        "h_loss_curve": [],
+    }
+
+    # ── v_optimizer persistent, a_optimizer reset each iteration ──────────
+    v_optimizer = optim.Adam(v_net.parameters(), lr=lr_v)
+
+    for iteration in range(n_iterations):
+        print(f"\n=== Iteration {iteration + 1}/{n_iterations} ===")
+
+        # Reset v LR to full value at the start of each iteration
+        for pg in v_optimizer.param_groups:
+            pg['lr'] = lr_v
+        v_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            v_optimizer, T_max=pde_epochs, eta_min=lr_v * 0.01)
+
+        # Fresh a_optimizer each iteration to avoid stale momentum
+        a_optimizer = optim.Adam(a_net.parameters(), lr=lr_a)
+        a_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            a_optimizer, T_max=ham_epochs, eta_min=lr_a * 0.01)
+
+        # ── Step 1: Solve PDE for value function ───────────────────────
+        v_loss_this_iter = []
+        best_v_loss = float('inf')
+        patience, patience_counter = 200, 0   # early stopping
+
+        for epoch in range(pde_epochs):
+            v_optimizer.zero_grad()
+
+            t = (torch.rand(batch_size) * lqr.T * 0.99).requires_grad_(True)
+            x = (torch.rand(batch_size, 2) * 6 - 3).requires_grad_(True)
+
+            with torch.no_grad():
+                a = a_net(t, x)
+
+            v    = v_net(t, x)
+            ones = torch.ones_like(v)
+            grads = torch.autograd.grad(v, [t, x], grad_outputs=ones,
+                                        create_graph=True)
+            v_t = grads[0]
+            v_x = grads[1]
+
+            sigma_vx   = v_x @ sigma_sigmaT
+            v_xx_trace = torch.autograd.grad(
+                (sigma_vx * v_x).sum(), x, create_graph=True
+            )[0].sum(dim=1)
+
+            drift    = torch.sum(v_x * (x @ H_t.T + a @ M_t.T), dim=1)
+            cost_x   = torch.sum(x * (x @ C_t.T), dim=1)
+            cost_a   = torch.sum(a * (a @ D_t.T), dim=1)
+            residual = v_t + 0.5 * v_xx_trace + drift + cost_x + cost_a
+            loss_pde = torch.mean(residual ** 2)
+
+            t_b      = torch.full((batch_size,), lqr.T)
+            x_b      = torch.rand(batch_size, 2) * 6 - 3
+            v_b      = v_net(t_b, x_b)
+            target_b = torch.sum(x_b * (x_b @ R_t.T), dim=1, keepdim=True)
+            loss_bc  = torch.mean((v_b - target_b) ** 2)
+
+            loss = loss_pde + loss_bc
+            loss.backward()
+
+            # Gradient clipping prevents explosive updates
+            torch.nn.utils.clip_grad_norm_(v_net.parameters(), max_norm=1.0)
+
+            v_optimizer.step()
+            v_scheduler.step()
+            v_loss_this_iter.append(loss.item())
+
+            # Early stopping — stop if PDE loss has plateaued
+            if loss.item() < best_v_loss - 1e-5:
+                best_v_loss = loss.item()
+                patience_counter = 0
+            else:
+                patience_counter += 1
+            if patience_counter >= patience:
+                print(f"  PDE early stop at epoch {epoch+1}, "
+                      f"loss={loss.item():.4e}")
+                break
+
+        history["v_loss_curve"].append(v_loss_this_iter)
+        history["v_loss_final"].append(v_loss_this_iter[-1])
+        print(f"  PDE final loss: {v_loss_this_iter[-1]:.4e}")
+
+        # ── Step 2: Minimise Hamiltonian ───────────────────────────────
+        h_loss_this_iter = []
+
+        for epoch in range(ham_epochs):
+            a_optimizer.zero_grad()
+
+            t = torch.rand(batch_size) * lqr.T
+            x = (torch.rand(batch_size, 2) * 6 - 3).requires_grad_(True)
+
+            v   = v_net(t, x)
+            v_x = torch.autograd.grad(
+            v.sum(), x, create_graph=False)[0].detach()
+            a   = a_net(t, x)
+            Ma  = a @ M_t.T
+
+            # Optimise only control-dependent terms (unchanged)
+            hamiltonian = torch.mean(
+                torch.sum(v_x * Ma, dim=1) +
+                torch.sum(a * (a @ D_t.T), dim=1)
+            )
+            hamiltonian.backward()
+            torch.nn.utils.clip_grad_norm_(a_net.parameters(), max_norm=1.0)
+            a_optimizer.step()
+            a_scheduler.step()
+
+            # Log the FULL Hamiltonian (no grad needed, just for recording)
+            with torch.no_grad():
+                full_H = torch.mean(
+                    torch.sum(v_x * (x @ H_t.T), dim=1) +  # Hx term
+                    torch.sum(v_x * Ma, dim=1) +              # Ma term
+                    torch.sum(x * (x @ C_t.T), dim=1) +      # state cost
+                    torch.sum(a * (a @ D_t.T), dim=1)         # control cost
+                )
+            h_loss_this_iter.append(full_H.item())  # <-- was hamiltonian.item()
+
+        history["h_loss_curve"].append(h_loss_this_iter)
+        history["h_loss_final"].append(h_loss_this_iter[-1])
+        print(f"  Ham final value: {h_loss_this_iter[-1]:.4e}")
+
+        # ── Evaluate errors ────────────────────────────────────────────
+        with torch.no_grad():
+            t_eval = torch.tensor([0.0])
+            x_eval = torch.tensor([x_test], dtype=torch.float32)
+            v_pred = v_net(t_eval, x_eval).item()
+            a_pred = a_net(t_eval, x_eval).numpy().flatten()
+
+        v_error = abs(v_pred - v_true) / abs(v_true)
+        a_error = np.linalg.norm(a_pred - a_true) / np.linalg.norm(a_true)
+        history["v_error"].append(v_error)
+        history["a_error"].append(a_error)
+
+        print(f"  Value:   pred={v_pred:.4f}, true={v_true:.4f}, "
+              f"rel_err={v_error:.4f}")
+        print(f"  Control: pred={a_pred}, true={a_true}, "
+              f"rel_err={a_error:.4f}")
+
+    return v_net, a_net, history
