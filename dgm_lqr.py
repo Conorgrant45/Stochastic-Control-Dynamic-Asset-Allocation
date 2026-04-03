@@ -523,7 +523,7 @@ class PDE_DGM_LQR(nn.Module):
                     break
 
             self.pia_history["v_loss_curve"].append(v_loss_this_iter)
-            self.pia_history["v_loss_final"].append(v_loss_this_iter[-1])
+            self.pia_history["v_loss_final"].append(min(v_loss_this_iter))
             print(f"  PDE final loss: {v_loss_this_iter[-1]:.4e}")
 
             # ── Step ii: minimise Hamiltonian ──────────────────────────────
