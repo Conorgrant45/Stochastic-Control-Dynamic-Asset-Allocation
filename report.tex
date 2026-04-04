@@ -103,12 +103,12 @@ and the optimal Markov control is $a(t,x) = -D^{-1}M^\top S(t)x$.
 \label{subsec:params}
 
 \begin{itemize}
-\item \textbf{Drift Matrix:} $H = \text{diag}(0.1, 0.1)$ creates an expansive system requiring active intervention.
-\item \textbf{Control Matrix:} $M = I_{2 \times 2}$ ensures full controllability across both dimensions.
-\item \textbf{State Cost:} $C = I_{2 \times 2}$ maintains a symmetric cost landscape for state deviations.
-\item \textbf{Control Cost:} $D = 0.1 \cdot I_{2 \times 2}$ is set lower than the state cost to encourage a dynamic optimal policy.
+\item \textbf{Drift Matrix:} $H = \text{diag}(0.1, 0.1)$ we choose positive diagonal values causing a drift away from origin, which requires the agent to work harder making the problem setup and simulations more interesting.
+\item \textbf{Control Matrix:} $M = I_{2 \times 2}$ ensures that control action $\alpha_i$ directly affects state $X_i$. This means every dimension of the problem is controllable.
+\item \textbf{State Cost:} $C = I_{2 \times 2}$ maintains a symmetric cost landscape, using the identity matrix ensures we care equally about errors in both spatial dimensions.
+\item \textbf{Control Cost:} $D = 0.1 \cdot I_{2 \times 2}$ is set lower than the state cost $C$ to This encourages the optimal policy to be more aggressive and dynamic in correcting errors.
 \item \textbf{Terminal Cost:} $R = I_{2 \times 2}$ prevents control decay near the horizon $T = 1.0$.
-\item \textbf{Diffusion:} $\sigma = 0.5$.
+\item \textbf{Diffusion:} $\sigma = 0.5$ adds noise strong enough to challenge the agent.
 \item \textbf{Initial State:} $x_0 = [1.0, 1.0]^\top$.
 \end{itemize}
 
@@ -140,7 +140,7 @@ the Riccati value $v^*$:
 
 \begin{itemize}
 \item \textbf{Scale Invariance:} The normalization by $|v^*(t_0, x_0)|$ ensures the error is independent of the magnitude of the value function, enabling meaningful comparisons across different parameter regimes.
-\item \textbf{Convergence Assessment:} The relative error facilitates clear visualization of convergence rates (e.g., Monte Carlo error decay) on log--log plots by removing scale effects.
+\item \textbf{Convergence Assessment:} The relative error facilitates clear visualization of convergence rates (e.g., Monte Carlo error decay) by removing scale effects.
 \end{itemize}
 
 \subsubsection{ Discretisation Scheme}The Monte Carlo estimate is found by simulating the controlled SDE using the \textbf{Implicit Euler-Maruyama} scheme. The controlled process is given by:$$ dX_t = (HX_t + M\alpha(t, X_t))dt + \sigma dW_t $$where $\alpha(t, X_t) = -D^{-1}M^\top S(t)X_t$ is the optimal feedback control. While the implicit scheme requires solving a linear system at each time step, it offers superior numerical stability for this class of problems compared to explicit schemes. Both explicit and implicit Euler-Maruyama schemes were implemented and verified to produce consistent convergence results; the implicit scheme is used throughout as the primary method.
@@ -166,7 +166,7 @@ $N_{\mathrm{MC}} \in \{10, 50, 100, 500, 1000, 5000,
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.7\linewidth]{figures/ex1_2_mcsamples.png}
+    \includegraphics[width=0.7\linewidth]{figures/ex1_2_mcsamples_2.png}
     \caption{Log--log plot of the error vs.\ number of Monte Carlo samples
              (fixed $N = 5000$). The dashed line indicates the expected
              $\mathcal{O}(N_{\mathrm{MC}}^{-1/2})$ convergence rate.}
@@ -185,7 +185,7 @@ Before deploying reinforcement learning or PDE-based solvers, we verify that our
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.7\linewidth]{figures/ex2_1_loss.png}
+    \includegraphics[width=0.7\linewidth]{figures/ex2_loss.png}
     \caption{Training loss (MSE) for supervised learning of the value function $v$.}
     \label{fig:ex2.1_loss}
 \end{figure}
@@ -251,7 +251,7 @@ The Policy Iteration Algorithm (PIA) iteratively refines the control policy by a
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\linewidth]{figures/ex4_1_convergence.png}
+    \includegraphics[width=0.9\linewidth]{figures/Value_Function_Convergence1.png}
     \caption{Error of the PIA value function $v(\cdot,\cdot;\theta_{\mathrm{val}})$
              relative to the Riccati solution across PIA iterations.}
     \label{fig:ex4.1_convergence}
@@ -300,7 +300,7 @@ These two plots track the algorithm's accuracy against our exact Riccati baselin
 \section{Conclusion}
 \label{sec:conclusion}
 
-In this report, we successfully implemented and validated a deep learning-based numerical algorithm for solving stochastic control problems, using a $2 \times 2$ LQR problem as our foundational test case. We first established a rigorous mathematical benchmark by solving the analytical Riccati ODE and confirming its expected stochastic convergence via Euler-Maruyama Monte Carlo simulations. Subsequent supervised learning experiments verified that our chosen neural network architectures possessed the requisite capacity to capture both quadratic value functions and linear control laws. Finally, by integrating the Deep Galerkin Method (DGM) for linear PDE evaluation with Hamiltonian minimisation for policy improvement, our Policy Iteration Algorithm (PIA) demonstrated strong, stable convergence toward the optimal theoretical bounds. Ultimately, these results highlight the efficacy of combining deep learning with policy iteration to overcome the traditional constraints of grid-based solvers in dynamic asset allocation.
+In this report, we successfully implemented and validated a deep learning-based numerical algorithm for solving stochastic control problems, using a $2 \times 2$ LQR problem as our foundational test case. We first established a rigorous mathematical benchmark by solving the analytical Riccati ODE and confirming its expected stochastic convergence via Euler-Maruyama Monte Carlo simulations. Subsequent supervised learning experiments verified that our chosen neural network architectures possessed the requisite capacity to capture both quadratic value functions and linear control laws. Finally, by integrating the Deep Galerkin Method (DGM) for linear PDE evaluation with Hamiltonian minimisation for policy improvement, our Policy Iteration Algorithm (PIA) for the value function demonstrated clear convergence toward the optimal cost, while the control policy showed a general downward trend with oscillations characteristic of neural network policy iteration. Ultimately, these results highlight the efficacy of combining deep learning with policy iteration to overcome the traditional constraints of grid-based solvers in dynamic asset allocation.
 
 
 
