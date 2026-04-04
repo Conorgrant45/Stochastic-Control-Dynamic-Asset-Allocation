@@ -185,7 +185,7 @@ Before deploying reinforcement learning or PDE-based solvers, we verify that our
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.7\linewidth]{figures/ex2_loss.png}
+    \includegraphics[width=0.7\linewidth]{figures/ex_2_loss.png}
     \caption{Training loss (MSE) for supervised learning of the value function $v$.}
     \label{fig:ex2.1_loss}
 \end{figure}
@@ -200,7 +200,7 @@ Similarly, we verify that a separate neural network, parameterised by $\phi$, ca
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.7\linewidth]{figures/ex2_2_loss.png}
+    \includegraphics[width=0.7\linewidth]{figures/ex_2_markov.png}
     \caption{Training loss (MSE) for supervised learning of the Markov control $a$.}
     \label{fig:ex2.2_loss}
 \end{figure}
@@ -230,13 +230,6 @@ As demonstrated in the training loss plot, the total PDE residual decreases stea
 \textbf{Theoretical Setup:}
 While the DGM loss function ensures the neural network satisfies the PDE locally, we must verify that $u_{\theta}(t,x)$ converges to the true expected cost. By the Feynman-Kac theorem, the solution to the linear Kolmogorov Backward Equation under a fixed control policy $a(t,x)$ represents the expected cumulative cost:$$ u(t,x) = \mathbb{E}\left[ \int_t^T \left( X_s^\top C X_s + a(s,X_s)^\top D a(s,X_s) \right) ds + X_T^\top R X_T \Big| X_t = x \right] $$where $X_s$ evolves according to the controlled SDE $dX_s = (HX_s + Ma(s,X_s))ds + \sigma dW_s$. To validate our DGM approximation, we simulate trajectories of this SDE using the Euler-Maruyama scheme (as established in Exercise 1.2) to compute an independent Monte Carlo estimate of the value function. We then compare this estimate directly against the output of our trained DGM network.
 
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.7\linewidth]{figures/ex3_1_mc_error.png}
-    \caption{Error of the DGM solution against the Monte Carlo reference
-             (constant control $\alpha$) at selected training checkpoints.}
-    \label{fig:ex3.1_mc_error}
-\end{figure}
 
 As shown in the comparison plot, the value function approximated by the Deep Galerkin Method closely tracks the independent Monte Carlo estimates. The alignment between the neural network surface and the stochastic simulations confirms that the DGM has not merely found a trivial or spurious root of the PDE residual, but has successfully converged to the true underlying value function for the fixed policy. Minor discrepancies are expected and can be attributed to the inherent sampling noise of the Monte Carlo method and the finite discretisation step size.
 
@@ -251,7 +244,7 @@ The Policy Iteration Algorithm (PIA) iteratively refines the control policy by a
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\linewidth]{figures/Value_Function_Convergence1.png}
+    \includegraphics[width=0.9\linewidth]{figures/ex4_1_convergence.png}
     \caption{Error of the PIA value function $v(\cdot,\cdot;\theta_{\mathrm{val}})$
              relative to the Riccati solution across PIA iterations.}
     \label{fig:ex4.1_convergence}
@@ -262,23 +255,30 @@ These two plots track the algorithm's accuracy against our exact Riccati baselin
 \item \textbf{Value Function Convergence:} The relative value error drops significantly during the first few iterations, stabilising around a low error threshold (e.g., $\sim 0.1$). This demonstrates that the alternating updates successfully drive the value approximation toward the true optimal cost.
 \item \textbf{Control Convergence:} The relative control error displays a clear downward trend (e.g., from approximately $2.0$ to $0.25$). The observed oscillations between iterations arise from the sensitivity of the Hamiltonian minimisation to minor inaccuracies in the value function's spatial gradient ($\partial_x v$), which is a known challenge when combining policy iteration with neural network function approximation.
 \end{itemize}
-
 \noindent Table~\ref{tab:pia_final} reports the final numerical comparison between the PIA output and the exact Riccati benchmark at $t=0$, $x_0 = [1,1]^\top$.
+
 \begin{table}[H]
     \centering
     \begin{tabular}{lccr}
         \toprule
         \textbf{Quantity} & \textbf{PIA Predicted} & \textbf{Riccati True} & \textbf{Rel.\ Error} \\
         \midrule
-        Value $v(0, x_0)$                            & 0.8347 & 0.8534 & 0.0218 \\
-        Control $a_1(0, x_0)$                        & -2.0873  & -3.2697  & 0.3617 \\
-        Control $a_2(0, x_0)$                        & -2.6231  & -3.2697  & 0.1977 \\
-        $\|a_{\mathrm{pred}} - a_{\mathrm{true}}\|$ & \multicolumn{2}{c}{(combined)} & 0.2914 \\
+        Value $v(0, x_0)$                            & 0.8455 & 0.8533 & 0.0092 \\
+        Control $a_1(0, x_0)$                        & -3.4072 & -3.2697 & 0.0421 \\
+        Control $a_2(0, x_0)$                        & -2.4706 & -3.2697 & 0.2444 \\
+        $\|a_{\mathrm{pred}} - a_{\mathrm{true}}\|$ & \multicolumn{2}{c}{(combined)} & 0.1754 \\
         \bottomrule
     \end{tabular}
     \caption{Final PIA numerical comparison at $t=0$, $x_0=[1,1]^\top$ after 10 iterations.}
     \label{tab:pia_final}
 \end{table}
+The value function achieves a relative error of 0.92\%, 
+demonstrating strong convergence to the true optimal cost. 
+The control error of 17.5\% reflects the known difficulty of 
+learning accurate gradients $\partial_x v$ from a neural network 
+approximation — $a_1$ converges closely (4.2\% error) while $a_2$ 
+shows greater deviation (24.4\%), consistent with the oscillatory 
+behaviour observed in the control convergence plot.
 
 
 \subsection{Internal Training Dynamics}
