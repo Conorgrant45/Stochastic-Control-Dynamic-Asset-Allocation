@@ -32,12 +32,12 @@ All figures are saved automatically to the figures/ directory.
 ## Project Structure
 - LQR.py — Core implementation: LQR class, Monte Carlo simulators, neural network 
   architectures, DGM trainer, and Policy Iteration Algorithm
+- dgm_lqr.py - PDE_DGM_LQR class
 - Assignment.ipynb — Notebook to reproduce all figures and results in the report
 
 ## Runtime Warning
-The Policy Iteration Algorithm (Exercise 4.1) is the most computationally expensive step 
-and may take 15-30 minutes depending on your hardware. The Monte Carlo sample 
-convergence plot (Figure 2) also takes several minutes due to repeated simulation runs.
+The Monte Carlo sample convergence plot (Figure 2) is the most computationally expensive step 
+and may take 15-30 minute to run due to repeated simulation runs.
 
 ## Implementation Notes
 - Riccati Solver: scipy.integrate.solve_ivp with RK45, rtol=1e-9, atol=1e-12
