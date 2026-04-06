@@ -476,7 +476,7 @@ def run_policy_iteration(lqr, n_iterations=10, pde_epochs=1000, ham_epochs=500,
     for iteration in range(n_iterations):
         print(f"\n=== Iteration {iteration + 1}/{n_iterations} ===")
 
-        # ── Step 1: Solve PDE for value function ──────────────────────────────
+        
         for epoch in range(pde_epochs):
             v_optimizer.zero_grad()
 
@@ -517,7 +517,7 @@ def run_policy_iteration(lqr, n_iterations=10, pde_epochs=1000, ham_epochs=500,
 
         history["v_loss"].append(loss.item())
 
-        # ── Step 2: Minimise Hamiltonian ──────────────────────────────────────
+        
         a_optimizer = optim.Adam(a_net.parameters(), lr=lr)
 
         for epoch in range(ham_epochs):
@@ -547,7 +547,7 @@ def run_policy_iteration(lqr, n_iterations=10, pde_epochs=1000, ham_epochs=500,
             )
         history["h_loss"].append(full_hamiltonian.item())
 
-        # ── Evaluate errors ───────────────────────────────────────────────────
+        
         with torch.no_grad():
             t_eval = torch.tensor([0.0])
             x_eval = torch.tensor([x_test], dtype=torch.float32)
@@ -619,7 +619,7 @@ def run_policy_iteration_2(lqr, n_iterations=10, pde_epochs=3000, ham_epochs=100
         a_scheduler = optim.lr_scheduler.CosineAnnealingLR(
             a_optimizer, T_max=ham_epochs, eta_min=lr_a * 0.01)
 
-        # ── Step 1: Solve PDE for value function ──────────────────────────────
+        
         v_loss_this_iter = []
         best_v_loss      = float('inf')
         patience, patience_counter = 200, 0
