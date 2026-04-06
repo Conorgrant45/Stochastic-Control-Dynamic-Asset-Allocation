@@ -15,7 +15,7 @@ Install the required libraries before running:
 ## How to Reproduce Results
 All figures and results in the PDF report are produced by running the Jupyter notebook:
 
-    jupyter notebook Assignment__1_.ipynb
+    jupyter notebook Assignment.ipynb
 
 Run all cells top to bottom in a single session. The notebook is divided into sections 
 matching the report:
@@ -30,9 +30,9 @@ matching the report:
 All figures are saved automatically to the figures/ directory.
 
 ## Project Structure
-- LQR__1_.py — Core implementation: LQR class, Monte Carlo simulators, neural network 
+- LQR.py — Core implementation: LQR class, Monte Carlo simulators, neural network 
   architectures, DGM trainer, and Policy Iteration Algorithm
-- Assignment__1_.ipynb — Notebook to reproduce all figures and results in the report
+- Assignment.ipynb — Notebook to reproduce all figures and results in the report
 
 ## Runtime Warning
 The Policy Iteration Algorithm (Exercise 4.1) is the most computationally expensive step 
